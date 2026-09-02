@@ -1,0 +1,30 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Archivos de configuración locales
+.env
+client_secret.json
+credenciales_drive.json
+token.json
+
+# Carpetas de datos y modelos (si son grandes, mejor no subirlos)
+archivos_subidos/
+modelos_entrenados/
+logs/
+
+# Archivos de editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Base de datos local (si usas SQLite)
+*.db
+*.sqlite3
