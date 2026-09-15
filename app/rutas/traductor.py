@@ -1,129 +1,32 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from typing import Dict, List, Any, Optional, Tuple
-import logging
+from typing import Dict, Any, Optional
 from datetime import datetime
+import logging
 import time
-import base64
-import cv2
-import numpy as np
 
 from ..utilidades.base_datos import obtener_bd
 from ..utilidades.seguridad import obtener_usuario_actual
 from ..modelos.usuario import Usuario
-from ..modelos.entrenamiento import ModeloIA
-from ..modelos.categoria import Categoria
 from ..esquemas.respuesta_schemas import RespuestaAPI
-from ..servicios.reconocimiento_adaptativo import ReconocimientoAdaptativoIA
+from ..servicios.gestor_reconocimiento import (
+    obtener_reconocedor,
+    determinar_tipo_sena,
+    procesar_frame_base64,
+    extraer_keypoints_frame,
+    limpiar_cache,
+    info_cache,
+)
 
 router = APIRouter(prefix="/traductor", tags=["Traductor"])
 logger = logging.getLogger(__name__)
 
-_cache_modelos = {
-    'modelos': {},
-    'ultimo_acceso': {}
-}
+# Antes este endpoint exigía solo 3 frames con manos detectadas y por debajo
+# de eso caía en un fallback de clasificación por imágenes crudas. Ahora usa
+# el mismo umbral que el modo video (4) y, si no lo alcanza, responde que no
+# detectó nada en vez de adivinar.
+MIN_FRAMES_CON_MANOS = 4
 
-def obtener_reconocedor_multi(bd: Session, categoria_id: Optional[int] = None) -> Tuple[ReconocimientoAdaptativoIA, int]:
-    try:
-        modelo_a_usar = None
-        
-        if categoria_id:
-            categoria = bd.query(Categoria).filter(Categoria.id == categoria_id).first()
-            if categoria and categoria.modelo_ia_id:
-                modelo_a_usar = bd.query(ModeloIA).filter(
-                    ModeloIA.id == categoria.modelo_ia_id,
-                    ModeloIA.activo == True
-                ).first()
-        
-        if not modelo_a_usar:
-            modelo_a_usar = bd.query(ModeloIA).filter(ModeloIA.activo == True).first()
-        
-        if not modelo_a_usar:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No hay modelo disponible para reconocimiento"
-            )
-        
-        if modelo_a_usar.id in _cache_modelos['modelos']:
-            _cache_modelos['ultimo_acceso'][modelo_a_usar.id] = datetime.now()
-            return _cache_modelos['modelos'][modelo_a_usar.id], modelo_a_usar.id
-        
-        reconocedor = ReconocimientoAdaptativoIA(ruta_modelo=modelo_a_usar.ruta_archivo)
-        
-        _cache_modelos['modelos'][modelo_a_usar.id] = reconocedor
-        _cache_modelos['ultimo_acceso'][modelo_a_usar.id] = datetime.now()
-        
-        return reconocedor, modelo_a_usar.id
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error obteniendo reconocedor: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error cargando modelo: {str(e)}"
-        )
-
-def predecir_con_multiples_modelos(bd: Session, frames: List, sena_esperada: Optional[str] = None) -> Dict[str, Any]:
-    try:
-        modelos_activos = bd.query(ModeloIA).filter(ModeloIA.activo == True).all()
-        
-        if not modelos_activos:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No hay modelos activos disponibles"
-            )
-        
-        mejor_resultado = None
-        todas_predicciones = []
-        
-        for modelo in modelos_activos:
-            try:
-                if modelo.id in _cache_modelos['modelos']:
-                    reconocedor = _cache_modelos['modelos'][modelo.id]
-                else:
-                    reconocedor = ReconocimientoAdaptativoIA(ruta_modelo=modelo.ruta_archivo)
-                    _cache_modelos['modelos'][modelo.id] = reconocedor
-                    _cache_modelos['ultimo_acceso'][modelo.id] = datetime.now()
-                
-                sena_detectada, confianza, detalles = reconocedor.predecir_desde_secuencia(frames, sena_esperada=sena_esperada)
-                
-                resultado_modelo = {
-                    'modelo_id': modelo.id,
-                    'modelo_nombre': modelo.nombre,
-                    'sena_detectada': sena_detectada,
-                    'confianza': confianza,
-                    'detalles': detalles
-                }
-                
-                todas_predicciones.append(resultado_modelo)
-                
-                if mejor_resultado is None or confianza > mejor_resultado['confianza']:
-                    mejor_resultado = resultado_modelo
-                
-            except Exception as e:
-                continue
-        
-        if not mejor_resultado:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Ningún modelo pudo procesar la solicitud"
-            )
-        
-        todas_predicciones.sort(key=lambda x: x['confianza'], reverse=True)
-        
-        return {
-            'mejor_prediccion': mejor_resultado,
-            'todas_predicciones': todas_predicciones[:5],
-            'total_modelos_consultados': len(todas_predicciones)
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error en predicción multi-modelo: {str(e)}")
-        raise
 
 @router.post("/senas-a-texto", response_model=RespuestaAPI)
 async def traducir_senas_a_texto(
@@ -132,190 +35,181 @@ async def traducir_senas_a_texto(
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
     start_time = time.time()
-    
     try:
-        video_base64 = data.get("video_base64")
         frames_base64 = data.get("frames_base64", [])
         imagen_base64 = data.get("imagen_base64")
         sena_esperada = data.get("sena_esperada")
         categoria_id = data.get("categoria_id")
-        usar_multiples_modelos = data.get("usar_multiples_modelos", True)  # POR DEFECTO TRUE
         configuracion = data.get("configuracion", {})
-        
-        if not video_base64 and not frames_base64 and not imagen_base64:
+        confianza_minima = configuracion.get("confianza_minima", 0.25)
+
+        if not frames_base64 and not imagen_base64:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Se requiere video, frames o imagen para reconocimiento"
+                detail="Se requieren frames o imagen"
             )
-        
+
+        # Procesar frames a imágenes (máximo 16 más recientes)
         frames = []
         if frames_base64:
-            frames_a_procesar = frames_base64[-16:]
-            for frame_b64 in frames_a_procesar:
-                try:
-                    if ',' in frame_b64:
-                        frame_b64 = frame_b64.split(',')[1]
-                    frame_bytes = base64.b64decode(frame_b64)
-                    frame_np = np.frombuffer(frame_bytes, np.uint8)
-                    frame = cv2.imdecode(frame_np, cv2.IMREAD_COLOR)
-                    if frame is not None:
-                        if frame.shape[0] != 224 or frame.shape[1] != 224:
-                            frame = cv2.resize(frame, (224, 224))
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        frames.append(frame)
-                except Exception as e:
-                    continue
-        
-        if len(frames) < 8:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Frames insuficientes ({len(frames)}/8)"
+            for frame_b64 in frames_base64[-16:]:
+                frame = procesar_frame_base64(frame_b64)
+                if frame is not None:
+                    frames.append(frame)
+        if not frames and imagen_base64:
+            frame = procesar_frame_base64(imagen_base64)
+            if frame is not None:
+                frames.append(frame)
+
+        if len(frames) < MIN_FRAMES_CON_MANOS:
+            return RespuestaAPI(
+                exito=False,
+                mensaje=f"Frames insuficientes ({len(frames)}/{MIN_FRAMES_CON_MANOS})",
+                datos={"confianza": 0.0, "sena_detectada": ""}
             )
-        
-        # ✅ CORRECCIÓN: SIEMPRE usar múltiples modelos a menos que se especifique categoría
-        if not categoria_id:
-            # Modo traductor libre: usar todos los modelos
-            resultado_multi = predecir_con_multiples_modelos(bd, frames, sena_esperada)
-            
-            mejor = resultado_multi['mejor_prediccion']
-            sena_detectada = mejor['sena_detectada']
-            confianza = mejor['confianza']
-            detalles = mejor['detalles']
-            modelo_usado = mejor['modelo_nombre']
-            modelo_id_usado = mejor['modelo_id']
-            
-            logger.info(f"Usando múltiples modelos. Mejor: {modelo_usado} - {sena_detectada} ({confianza*100:.1f}%)")
-            
+
+        # Extraer keypoints de cada frame
+        keypoints_secuencia = []
+        for frame in frames:
+            kp = extraer_keypoints_frame(frame)
+            if kp is not None:
+                keypoints_secuencia.append(kp)
+
+        # -----------------------------------------------------------------
+        # CAMBIO CLAVE (antes causaba falsos positivos):
+        # Ya NO hay fallback a un modelo de imágenes crudas cuando no se
+        # detectan manos suficientes. Ese fallback no sabía si había manos
+        # en la imagen o no, así que podía "inventar" una seña cuando no
+        # había nada frente a la cámara. Ahora se responde honestamente
+        # que no se detectó nada, igual que ya hacía el modo video.
+        # -----------------------------------------------------------------
+        if len(keypoints_secuencia) < MIN_FRAMES_CON_MANOS:
+            processing_time = time.time() - start_time
+            return RespuestaAPI(
+                exito=False,
+                mensaje=f"No se detectaron manos suficientes ({len(keypoints_secuencia)}/{MIN_FRAMES_CON_MANOS})",
+                datos={
+                    "confianza": 0.0,
+                    "sena_detectada": "",
+                    "num_frames_procesados": len(keypoints_secuencia),
+                    "tiempo_procesamiento_ms": round(processing_time * 1000, 2),
+                    "categoria_id": categoria_id,
+                }
+            )
+
+        # Modelo compartido con el modo video: se carga una sola vez y ya
+        # viene precalentado (warm-up), así la captura manual deja de sufrir
+        # el arranque en frío que antes solo evitaba el modo continuo.
+        reconocedor, modelo_id = obtener_reconocedor(bd, categoria_id)
+        tipo_sena = determinar_tipo_sena(bd, sena_esperada, categoria_id, reconocedor)
+
+        if tipo_sena == 'ESTATICA' and len(keypoints_secuencia) >= 5:
+            centro = len(keypoints_secuencia) // 2
+            inicio = max(0, centro - 2)
+            fin = min(len(keypoints_secuencia), centro + 2)
+            keypoints_a_usar = keypoints_secuencia[inicio:fin]
         else:
-            # Modo específico: usar solo el modelo de la categoría
-            reconocedor, modelo_id_usado = obtener_reconocedor_multi(bd, categoria_id)
-            
-            sena_detectada, confianza, detalles = reconocedor.predecir_desde_secuencia(frames, sena_esperada=sena_esperada)
-            
-            modelo_db = bd.query(ModeloIA).filter(ModeloIA.id == modelo_id_usado).first()
-            modelo_usado = modelo_db.nombre if modelo_db else "Desconocido"
-            
-            logger.info(f"Usando categoría específica: {modelo_usado} - {sena_detectada} ({confianza*100:.1f}%)")
-        
+            keypoints_a_usar = keypoints_secuencia
+
+        sena_detectada, confianza, detalles = reconocedor.predecir_desde_keypoints(
+            keypoints_a_usar, tipo_sena
+        )
+        modo = tipo_sena
+
+        confianza = max(0.0, min(1.0, confianza))
         processing_time = time.time() - start_time
-        
-        confianza_minima = configuracion.get("confianza_minima", 0.25)
-        
+
         if confianza >= 0.80:
-            calidad = "excelente"
-            mensaje = "Alta confianza"
+            calidad, mensaje = "excelente", f"Alta confianza: {sena_detectada}"
+        elif confianza >= 0.70:
+            calidad, mensaje = "buena", f"Buena confianza: {sena_detectada}"
         elif confianza >= 0.60:
-            calidad = "buena"
-            mensaje = "Buena confianza"
-        elif confianza >= 0.40:
-            calidad = "moderada"
-            mensaje = "Confianza moderada"
+            calidad, mensaje = "moderada", f"Confianza moderada: {sena_detectada}"
         elif confianza >= confianza_minima:
-            calidad = "baja"
-            mensaje = "Baja confianza"
+            calidad, mensaje = "baja", f"Baja confianza: {sena_detectada}"
         else:
-            calidad = "muy_baja"
-            mensaje = "Seña no reconocida"
-        
-        texto_traducido = sena_detectada
-        if confianza < confianza_minima:
-            texto_traducido = f"{sena_detectada}?"
-        
+            calidad, mensaje = "muy_baja", "Seña no reconocida claramente"
+
+        texto_traducido = sena_detectada if confianza >= confianza_minima else f"{sena_detectada}?"
+
         resultado = {
-            "modo": "senas-a-texto",
-            "texto_traducido": texto_traducido,
             "sena_detectada": sena_detectada,
+            "texto_traducido": texto_traducido,
             "confianza": round(confianza, 4),
-            "confianza_raw": round(confianza, 4),
             "porcentaje": round(confianza * 100, 2),
             "calidad": calidad,
             "mensaje": mensaje,
-            "modelo_usado": modelo_usado,
-            "modelo_id": modelo_id_usado,
+            "modo": modo,
+            "num_frames_procesados": len(keypoints_secuencia),
+            "tiempo_procesamiento_ms": round(processing_time * 1000, 2),
+            "modelo_usado": modelo_id,
             "categoria_id": categoria_id,
             "alternativas": detalles.get("alternativas", [])[:3],
-            "tiempo_procesamiento_ms": round(processing_time * 1000, 2),
             "timestamp": datetime.now().isoformat()
         }
-        
-        # ✅ SIEMPRE incluir información de múltiples modelos cuando no hay categoría
-        if not categoria_id and 'resultado_multi' in locals():
-            resultado['modelos_consultados'] = resultado_multi['total_modelos_consultados']
-            resultado['todas_predicciones'] = [
-                {
-                    'modelo': pred['modelo_nombre'],
-                    'sena': pred['sena_detectada'],
-                    'confianza': round(pred['confianza'], 4),
-                    'porcentaje': round(pred['confianza'] * 100, 2)
-                }
-                for pred in resultado_multi['todas_predicciones'][:3]
-            ]
-        
-        return RespuestaAPI(
-            exito=True,
-            mensaje="Reconocimiento completado",
-            datos=resultado
-        )
-        
+
+        return RespuestaAPI(exito=True, mensaje="Reconocimiento completado", datos=resultado)
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error en traducción: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error en reconocimiento: {str(e)}"
+        logger.error(f"Error en traducción: {str(e)}", exc_info=True)
+        return RespuestaAPI(
+            exito=False,
+            mensaje=f"Error interno: {str(e)}",
+            datos={"confianza": 0.0, "sena_detectada": ""}
         )
+
 
 @router.get("/modelos-activos")
 async def obtener_modelos_activos(
     bd: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
+    from ..modelos.entrenamiento import ModeloIA
+    from ..modelos.categoria import Categoria
+    from ..servicios.gestor_reconocimiento import _cache  # solo lectura, para reportar estado
+
     try:
         modelos = bd.query(ModeloIA).filter(ModeloIA.activo == True).all()
-        
+
         modelos_info = []
         for modelo in modelos:
             categorias = bd.query(Categoria).filter(
                 Categoria.modelo_ia_id == modelo.id,
                 Categoria.activa == True
             ).all()
-            
-            # Obtener información del reconocedor cargado
+
             reconocedor_info = {}
-            if modelo.id in _cache_modelos['modelos']:
-                reconocedor = _cache_modelos['modelos'][modelo.id]
+            cargado = modelo.id in _cache['reconocedores']
+            if cargado:
+                reconocedor = _cache['reconocedores'][modelo.id]
                 reconocedor_info = {
                     'clases_cargadas': len(reconocedor.clases),
                     'arquitectura': reconocedor.arquitectura,
                     'accuracy': round(reconocedor.accuracy * 100, 2) if hasattr(reconocedor, 'accuracy') else 0
                 }
-            
+
             modelos_info.append({
                 "id": modelo.id,
                 "nombre": modelo.nombre,
                 "num_clases": modelo.num_clases,
                 "accuracy": round(modelo.accuracy * 100, 2) if modelo.accuracy else 0,
                 "categorias_asignadas": [{"id": cat.id, "nombre": cat.nombre} for cat in categorias],
-                "reconocedor_cargado": modelo.id in _cache_modelos['modelos'],
+                "reconocedor_cargado": cargado,
                 "info_reconocedor": reconocedor_info
             })
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje=f"Se encontraron {len(modelos_info)} modelos activos",
-            datos={
-                "total_modelos": len(modelos_info),
-                "modelos": modelos_info
-            }
+            datos={"total_modelos": len(modelos_info), "modelos": modelos_info}
         )
-        
+
     except Exception as e:
         logger.error(f"Error obteniendo modelos: {e}")
-        return RespuestaAPI(
-            exito=False,
-            mensaje=f"Error: {str(e)}"
-        )
+        return RespuestaAPI(exito=False, mensaje=f"Error: {str(e)}")
+
 
 @router.post("/probar-todos-modelos")
 async def probar_todos_modelos(
@@ -323,83 +217,28 @@ async def probar_todos_modelos(
     bd: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    try:
-        frames_base64 = data.get("frames_base64", [])
-        
-        if not frames_base64:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Se requieren frames para la prueba"
-            )
-        
-        frames = []
-        for frame_b64 in frames_base64[-12:]:
-            try:
-                if ',' in frame_b64:
-                    frame_b64 = frame_b64.split(',')[1]
-                frame_bytes = base64.b64decode(frame_b64)
-                frame_np = np.frombuffer(frame_bytes, np.uint8)
-                frame = cv2.imdecode(frame_np, cv2.IMREAD_COLOR)
-                if frame is not None:
-                    if frame.shape[0] != 224 or frame.shape[1] != 224:
-                        frame = cv2.resize(frame, (224, 224))
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    frames.append(frame)
-            except Exception as e:
-                continue
-        
-        if len(frames) < 6:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Frames insuficientes para prueba"
-            )
-        
-        resultado_multi = predecir_con_multiples_modelos(bd, frames)
-        
-        return RespuestaAPI(
-            exito=True,
-            mensaje=f"Prueba completada con {resultado_multi['total_modelos_consultados']} modelos",
-            datos=resultado_multi
-        )
-        
-    except Exception as e:
-        logger.error(f"Error en prueba de modelos: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+    """
+    OJO: este endpoint ya estaba roto en el archivo original. Llamaba a
+    `predecir_con_multiples_modelos(bd, frames)`, una función que no está
+    definida ni importada en ningún lado de traductor.py, así que cualquier
+    llamada terminaba en NameError (error 500 sin mensaje claro).
+
+    No se reconstruye aquí porque no tenemos su implementación real. Si
+    existe en algún otro archivo de `servicios/`, impórtala arriba y
+    reemplaza este cuerpo por la lógica original. Si no existe, hay que
+    escribirla desde cero o eliminar el endpoint.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Endpoint pendiente: falta la función predecir_con_multiples_modelos"
+    )
+
 
 @router.post("/limpiar-cache")
 async def limpiar_cache_traductor(modelo_id: Optional[int] = None):
     try:
-        if modelo_id:
-            if modelo_id in _cache_modelos['modelos']:
-                del _cache_modelos['modelos'][modelo_id]
-                if modelo_id in _cache_modelos['ultimo_acceso']:
-                    del _cache_modelos['ultimo_acceso'][modelo_id]
-                mensaje = f"Cache del modelo {modelo_id} limpiado"
-            else:
-                mensaje = f"Modelo {modelo_id} no estaba en cache"
-        else:
-            _cache_modelos['modelos'].clear()
-            _cache_modelos['ultimo_acceso'].clear()
-            mensaje = "Cache de todos los modelos limpiado"
-        
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
-        
-        return RespuestaAPI(
-            exito=True,
-            mensaje=mensaje
-        )
-        
+        mensaje = limpiar_cache(modelo_id)
+        return RespuestaAPI(exito=True, mensaje=mensaje)
     except Exception as e:
         logger.error(f"Error limpiando cache: {e}")
-        return RespuestaAPI(
-            exito=False,
-            mensaje=f"Error: {str(e)}"
-        )
+        return RespuestaAPI(exito=False, mensaje=f"Error: {str(e)}")

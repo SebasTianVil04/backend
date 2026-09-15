@@ -23,24 +23,24 @@ httpx==0.25.2
 python-dotenv==1.0.0
 aiofiles==23.2.1
 
-# NumPy - versiÃ³n especÃ­fica para Python 3.8
+# NumPy - versión específica para Python 3.8
 numpy==1.24.3
 
-# Pillow - versiÃ³n ESPECÃFICA con wheels para Python 3.8
+# Pillow - versión ESPECÍFICA con wheels para Python 3.8
 Pillow==8.4.0
 
-# Protobuf - CRÃTICO: versiÃ³n compatible con mediapipe
+# Protobuf - CRÍTICO: versión compatible con mediapipe
 protobuf==3.20.3
 
-# Computer Vision - versiÃ³n compatible
+# Computer Vision - versión compatible
 opencv-python==4.8.0.76
 
-# Machine Learning - versiÃ³n estable
+# Machine Learning - versión estable
 scikit-learn==1.3.0
 scipy==1.10.1
 pandas==2.0.3
 
-# MediaPipe - versiÃ³n compatible con Python 3.8
+# MediaPipe - versión compatible con Python 3.8
 mediapipe==0.10.7
 
 # Email
@@ -60,7 +60,7 @@ seaborn==0.12.2
 tqdm==4.65.0
 wandb==0.15.9
 
-# OptimizaciÃ³n de rendimiento
+# Optimización de rendimiento
 numba==0.57.1
 
 # Procesamiento de video
@@ -76,3 +76,4 @@ gpustat==1.0.0
 google-api-python-client==2.108.0
 google-auth-httplib2==0.1.1
 google-auth-oauthlib==1.1.0
+httplib2==0.19.1

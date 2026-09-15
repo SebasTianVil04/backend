@@ -20,6 +20,7 @@ from ..esquemas.respuesta_schemas import RespuestaAPI, RespuestaLista
 router = APIRouter(prefix="/examenes", tags=["Exámenes"])
 
 
+@router.get("", response_model=RespuestaLista)
 @router.get("/", response_model=RespuestaLista)
 async def listar_examenes(
     db: Session = Depends(obtener_bd),
@@ -27,20 +28,19 @@ async def listar_examenes(
     tipo: str = None,
     nivel: int = None
 ):
-    """Listar exámenes disponibles con resultados del usuario"""
     try:
         query = db.query(Examen).filter(Examen.activo == True)
-        
+
         if tipo:
             query = query.filter(Examen.tipo == tipo)
-        
+
         if nivel:
             query = query.filter(Examen.nivel == nivel)
-        
+
         query = query.order_by(Examen.tipo, Examen.nivel)
-        
+
         examenes = query.all()
-        
+
         examenes_ids = [examen.id for examen in examenes]
         resultados = db.query(ResultadoExamen).filter(
             and_(
@@ -48,36 +48,32 @@ async def listar_examenes(
                 ResultadoExamen.examen_id.in_(examenes_ids)
             )
         ).all()
-        
+
         mapa_resultados = {}
         for resultado in resultados:
-            if (resultado.examen_id not in mapa_resultados or 
+            if (resultado.examen_id not in mapa_resultados or
                 resultado.fecha_finalizacion > mapa_resultados[resultado.examen_id].fecha_finalizacion):
                 mapa_resultados[resultado.examen_id] = resultado
-        
+
         examenes_data = []
         for examen in examenes:
             resultado = mapa_resultados.get(examen.id)
-            
-            # ✅ CORRECCIÓN: Agregar TODOS los campos necesarios del examen
+
             examen_info = {
                 "id": examen.id,
                 "titulo": examen.titulo,
                 "descripcion": examen.descripcion,
                 "tipo": examen.tipo,
                 "nivel": examen.nivel,
-                # ✅ CAMPOS CRÍTICOS AGREGADOS:
                 "leccion_id": examen.leccion_id,
                 "orden": examen.orden,
                 "clases_requeridas": examen.clases_requeridas,
                 "requiere_todas_clases": examen.requiere_todas_clases,
-                "activo": examen.activo,  # ✅ IMPORTANTE: Este campo faltaba
-                # Campos adicionales
+                "activo": examen.activo,
                 "tiempo_limite": examen.tiempo_limite,
                 "puntuacion_minima": examen.puntuacion_minima,
                 "total_preguntas": len(examen.preguntas) if hasattr(examen, 'preguntas') else 0,
                 "fecha_creacion": examen.fecha_creacion,
-                # Información del último resultado
                 "ultimo_resultado": {
                     "realizado": resultado is not None,
                     "aprobado": resultado.aprobado if resultado else False,
@@ -91,12 +87,11 @@ async def listar_examenes(
                     "porcentaje": None,
                     "fecha": None
                 },
-                # Campos de disponibilidad (se calculan en el frontend)
                 "completado": resultado is not None and resultado.aprobado,
-                "disponible": None  # Se calcula en el frontend
+                "disponible": None
             }
             examenes_data.append(examen_info)
-        
+
         return RespuestaLista(
             exito=True,
             mensaje=f"Se encontraron {len(examenes_data)} exámenes",
@@ -105,7 +100,7 @@ async def listar_examenes(
             pagina=1,
             por_pagina=len(examenes_data)
         )
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -118,7 +113,6 @@ async def obtener_examenes_por_leccion(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    """Obtener exámenes asociados a una lección específica"""
     try:
         examenes = db.query(Examen).filter(
             and_(
@@ -126,7 +120,7 @@ async def obtener_examenes_por_leccion(
                 Examen.leccion_id == leccion_id
             )
         ).order_by(Examen.orden).all()
-        
+
         if not examenes:
             return RespuestaLista(
                 exito=True,
@@ -136,7 +130,7 @@ async def obtener_examenes_por_leccion(
                 pagina=1,
                 por_pagina=0
             )
-        
+
         progreso_clases = db.query(ProgresoClase).join(Clase).filter(
             and_(
                 ProgresoClase.usuario_id == usuario_actual.id,
@@ -144,14 +138,14 @@ async def obtener_examenes_por_leccion(
                 ProgresoClase.completada == True
             )
         ).count()
-        
+
         total_clases = db.query(Clase).filter(
             and_(
                 Clase.leccion_id == leccion_id,
                 Clase.activa == True
             )
         ).count()
-        
+
         examenes_data = []
         for examen in examenes:
             mejor_resultado = db.query(ResultadoExamen).filter(
@@ -160,16 +154,16 @@ async def obtener_examenes_por_leccion(
                     ResultadoExamen.examen_id == examen.id
                 )
             ).order_by(ResultadoExamen.porcentaje.desc()).first()
-            
+
             disponible = True
-            
+
             if not examen.activo:
                 disponible = False
             elif examen.requiere_todas_clases:
                 disponible = progreso_clases >= total_clases
             elif examen.clases_requeridas > 0:
                 disponible = progreso_clases >= examen.clases_requeridas
-            
+
             examen_info = {
                 "id": examen.id,
                 "titulo": examen.titulo,
@@ -189,7 +183,7 @@ async def obtener_examenes_por_leccion(
                 "disponible": disponible
             }
             examenes_data.append(examen_info)
-        
+
         return RespuestaLista(
             exito=True,
             mensaje=f"Exámenes de la lección {leccion_id}",
@@ -198,7 +192,7 @@ async def obtener_examenes_por_leccion(
             pagina=1,
             por_pagina=len(examenes_data)
         )
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -212,7 +206,6 @@ async def obtener_progreso_examenes_leccion(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    """Obtener progreso de exámenes para una lección específica"""
     try:
         examenes = db.query(Examen).filter(
             and_(
@@ -220,7 +213,7 @@ async def obtener_progreso_examenes_leccion(
                 Examen.activo == True
             )
         ).all()
-        
+
         progreso_examenes = []
         for examen in examenes:
             mejor_resultado = db.query(ResultadoExamen).filter(
@@ -230,21 +223,21 @@ async def obtener_progreso_examenes_leccion(
                     ResultadoExamen.aprobado == True
                 )
             ).order_by(ResultadoExamen.porcentaje.desc()).first()
-            
+
             total_intentos = db.query(ResultadoExamen).filter(
                 and_(
                     ResultadoExamen.examen_id == examen.id,
                     ResultadoExamen.usuario_id == usuario_actual.id
                 )
             ).count()
-            
+
             ultimo_intento = db.query(ResultadoExamen).filter(
                 and_(
                     ResultadoExamen.examen_id == examen.id,
                     ResultadoExamen.usuario_id == usuario_actual.id
                 )
             ).order_by(ResultadoExamen.fecha_finalizacion.desc()).first()
-            
+
             progreso_examenes.append({
                 "examen_id": examen.id,
                 "titulo": examen.titulo,
@@ -254,11 +247,11 @@ async def obtener_progreso_examenes_leccion(
                 "ultimo_intento": ultimo_intento.fecha_finalizacion if ultimo_intento else None,
                 "aprobado": mejor_resultado.aprobado if mejor_resultado else False
             })
-        
+
         total_examenes = len(progreso_examenes)
         examenes_completados = sum(1 for p in progreso_examenes if p["completado"])
         promedio_calificacion = sum(p["mejor_calificacion"] for p in progreso_examenes) / total_examenes if total_examenes > 0 else 0
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje="Progreso de exámenes obtenido",
@@ -273,7 +266,7 @@ async def obtener_progreso_examenes_leccion(
                 }
             }
         )
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -287,7 +280,6 @@ async def obtener_examen(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    """Obtener un examen específico con sus preguntas"""
     try:
         examen = db.query(Examen).filter(
             and_(
@@ -295,17 +287,17 @@ async def obtener_examen(
                 Examen.activo == True
             )
         ).first()
-        
+
         if not examen:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Examen no encontrado"
             )
-        
+
         preguntas = db.query(PreguntaExamen).filter(
             PreguntaExamen.examen_id == examen_id
         ).order_by(PreguntaExamen.orden).all()
-        
+
         preguntas_data = []
         for pregunta in preguntas:
             pregunta_info = {
@@ -319,14 +311,14 @@ async def obtener_examen(
                 "orden": pregunta.orden
             }
             preguntas_data.append(pregunta_info)
-        
+
         ultimo_resultado = db.query(ResultadoExamen).filter(
             and_(
                 ResultadoExamen.usuario_id == usuario_actual.id,
                 ResultadoExamen.examen_id == examen_id
             )
         ).order_by(ResultadoExamen.fecha_finalizacion.desc()).first()
-        
+
         examen_data = {
             "id": examen.id,
             "titulo": examen.titulo,
@@ -346,13 +338,13 @@ async def obtener_examen(
                 "fecha": ultimo_resultado.fecha_finalizacion if ultimo_resultado else None
             } if ultimo_resultado else None
         }
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje="Examen encontrado",
             datos=examen_data
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -365,97 +357,69 @@ async def obtener_examen(
 @router.post("/{examen_id}/presentar", response_model=RespuestaAPI)
 async def presentar_examen(
     examen_id: int,
-    data: Dict[str, Any],  # ✅ Recibir todo el body como dict
+    data: Dict[str, Any],
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    """Presentar un examen con las respuestas del usuario"""
     try:
-        # ✅ Extraer tiempo_empleado del body
         tiempo_empleado = data.pop('tiempo_empleado', None)
-        respuestas = data  # El resto son las respuestas
-        
-        print(f"\n{'='*60}")
-        print(f"📝 PRESENTANDO EXAMEN {examen_id}")
-        print(f"👤 Usuario: {usuario_actual.id}")
-        print(f"📥 Body completo: {data}")
-        print(f"📝 Respuestas: {respuestas}")
-        print(f"⏱️  Tiempo empleado: {tiempo_empleado} segundos")
-        print(f"{'='*60}\n")
-        
+        respuestas = data
+
         examen = db.query(Examen).filter(
             and_(
                 Examen.id == examen_id,
                 Examen.activo == True
             )
         ).first()
-        
+
         if not examen:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Examen no encontrado"
             )
-        
+
         preguntas = db.query(PreguntaExamen).filter(
             PreguntaExamen.examen_id == examen_id
         ).all()
-        
-        print(f"📋 Total de preguntas en el examen: {len(preguntas)}")
-        
+
         if not preguntas:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="El examen no tiene preguntas configuradas"
             )
-        
+
         puntuacion_obtenida = 0
         puntuacion_maxima = sum(pregunta.puntos for pregunta in preguntas)
         respuestas_detalladas = {}
-        
-        print(f"\n🎯 CALIFICANDO RESPUESTAS:")
-        print(f"{'─'*60}")
-        
+
         for pregunta in preguntas:
             pregunta_id_str = str(pregunta.id)
             respuesta_usuario = respuestas.get(pregunta_id_str)
-            
+
             es_correcta = False
-            
+
             if pregunta.tipo_pregunta == "multiple":
                 es_correcta = respuesta_usuario == pregunta.respuesta_correcta
-                
+
             elif pregunta.tipo_pregunta == "verdadero_falso":
                 es_correcta = respuesta_usuario == pregunta.respuesta_correcta
-                
+
             elif pregunta.tipo_pregunta == "reconocimiento":
-                # ✅ CORRECCIÓN: Normalizar strings para comparación
                 respuesta_normalizada = str(respuesta_usuario).upper().strip() if respuesta_usuario else ""
                 sena_esperada_normalizada = str(pregunta.sena_esperada).upper().strip() if pregunta.sena_esperada else ""
-                
-                print(f"   🔍 Pregunta {pregunta.id} (reconocimiento):")
-                print(f"      Respuesta usuario: '{respuesta_normalizada}'")
-                print(f"      Seña esperada: '{sena_esperada_normalizada}'")
-                
-                # ✅ Validar que sena_esperada no sea NULL o vacía
+
                 if not sena_esperada_normalizada:
-                    print(f"      ⚠️  ERROR: sena_esperada es NULL o vacía")
-                    # Si no hay seña esperada configurada, buscar en la lección
                     from app.modelos.leccion import Leccion
                     if pregunta.leccion_id:
                         leccion = db.query(Leccion).filter(Leccion.id == pregunta.leccion_id).first()
                         if leccion and leccion.sena:
                             sena_esperada_normalizada = leccion.sena.upper().strip()
-                            print(f"      🔄 Usando seña de la lección: '{sena_esperada_normalizada}'")
-                
+
                 es_correcta = respuesta_normalizada == sena_esperada_normalizada and len(sena_esperada_normalizada) > 0
-                print(f"      {'✅' if es_correcta else '❌'} Correcta: {es_correcta}")
-            
+
             puntos_pregunta = pregunta.puntos if es_correcta else 0
             puntuacion_obtenida += puntos_pregunta
-            
-            print(f"      💯 Puntos: {puntos_pregunta}/{pregunta.puntos}")
-            print(f"{'─'*60}")
-            
+
             respuestas_detalladas[pregunta_id_str] = {
                 "respuesta_usuario": respuesta_usuario,
                 "respuesta_correcta": pregunta.respuesta_correcta or pregunta.sena_esperada,
@@ -463,18 +427,10 @@ async def presentar_examen(
                 "puntos_obtenidos": puntos_pregunta,
                 "puntos_maximos": pregunta.puntos
             }
-        
-        print(f"\n📊 RESULTADOS FINALES:")
-        print(f"   Puntuación obtenida: {puntuacion_obtenida}/{puntuacion_maxima}")
-        
+
         porcentaje = (puntuacion_obtenida / puntuacion_maxima * 100) if puntuacion_maxima > 0 else 0
-        print(f"   Porcentaje: {porcentaje:.1f}%")
-        print(f"   Puntuación mínima: {examen.puntuacion_minima}%")
-        
         aprobado = porcentaje >= examen.puntuacion_minima
-        print(f"   {'✅ APROBADO' if aprobado else '❌ NO APROBADO'}")
-        print(f"{'='*60}\n")
-        
+
         resultado = ResultadoExamen(
             usuario_id=usuario_actual.id,
             examen_id=examen_id,
@@ -487,11 +443,11 @@ async def presentar_examen(
             fecha_inicio=datetime.utcnow(),
             fecha_finalizacion=datetime.utcnow()
         )
-        
+
         db.add(resultado)
         db.commit()
         db.refresh(resultado)
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje="Examen presentado exitosamente" + (" - ¡APROBADO!" if aprobado else " - No aprobado"),
@@ -509,14 +465,11 @@ async def presentar_examen(
                 "fecha_finalizacion": resultado.fecha_finalizacion
             }
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        print(f"❌ ERROR: {str(e)}")
-        import traceback
-        print(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al presentar examen: {str(e)}"
@@ -529,7 +482,6 @@ async def obtener_resultados_examen(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    """Obtener todos los resultados del usuario para un examen específico"""
     try:
         examen = db.query(Examen).filter(Examen.id == examen_id).first()
         if not examen:
@@ -537,14 +489,14 @@ async def obtener_resultados_examen(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Examen no encontrado"
             )
-        
+
         resultados = db.query(ResultadoExamen).filter(
             and_(
                 ResultadoExamen.usuario_id == usuario_actual.id,
                 ResultadoExamen.examen_id == examen_id
             )
         ).order_by(ResultadoExamen.fecha_finalizacion.desc()).all()
-        
+
         resultados_data = []
         for resultado in resultados:
             resultado_info = {
@@ -559,10 +511,10 @@ async def obtener_resultados_examen(
                 "total_preguntas": len(resultado.respuestas) if resultado.respuestas else 0
             }
             resultados_data.append(resultado_info)
-        
+
         mejor_resultado = max(resultados, key=lambda x: x.porcentaje) if resultados else None
         promedio_porcentaje = sum(r.porcentaje for r in resultados) / len(resultados) if resultados else 0
-        
+
         return RespuestaLista(
             exito=True,
             mensaje=f"Historial de {len(resultados_data)} intentos",
@@ -571,7 +523,7 @@ async def obtener_resultados_examen(
             pagina=1,
             por_pagina=len(resultados_data)
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:

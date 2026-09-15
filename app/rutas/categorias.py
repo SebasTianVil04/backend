@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session, joinedload
-from typing import List, Dict,Optional
-from app.modelos.dataset import CategoriaDataset
+from typing import List, Dict, Optional
+from app.modelos.dataset import CategoriaDataset, VideoDataset
 from ..utilidades.base_datos import obtener_bd
 from ..utilidades.seguridad import obtener_usuario_actual, verificar_admin
 from ..modelos.usuario import Usuario
@@ -10,7 +10,6 @@ from ..modelos.tipo_categoria import TipoCategoria
 from ..esquemas.categoria import CategoriaCrear, CategoriaActualizar
 from ..esquemas.respuestas import RespuestaAPI, RespuestaLista
 from pydantic import BaseModel
-from typing import List
 
 
 router = APIRouter(prefix="/categorias", tags=["Categorías"])
@@ -19,6 +18,7 @@ router = APIRouter(prefix="/categorias", tags=["Categorías"])
 class AsignacionModeloLote(BaseModel):
     categoria_id: int
     modelo_id: Optional[int] = None
+
 
 class AsignacionesLoteRequest(BaseModel):
     asignaciones: List[AsignacionModeloLote]
@@ -29,16 +29,13 @@ def listar_categorias_con_modelos_completo(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    """
-    Lista todas las categorías con información detallada de sus modelos asignados
-    """
     try:
         from app.modelos.entrenamiento import ModeloIA
-        
+
         categorias = db.query(Categoria).options(
             joinedload(Categoria.modelo_ia)
         ).filter(Categoria.activa == True).order_by(Categoria.orden).all()
-        
+
         categorias_data = []
         for categoria in categorias:
             categoria_dict = {
@@ -55,8 +52,7 @@ def listar_categorias_con_modelos_completo(
                 "modelo_ia_id": categoria.modelo_ia_id,
                 "tiene_modelo": categoria.modelo_ia_id is not None
             }
-            
-            # Agregar info del modelo si existe
+
             if categoria.modelo_ia:
                 categoria_dict.update({
                     "modelo_nombre": categoria.modelo_ia.nombre,
@@ -73,9 +69,9 @@ def listar_categorias_con_modelos_completo(
                     "modelo_num_clases": None,
                     "modelo_tipo": None
                 })
-            
+
             categorias_data.append(categoria_dict)
-        
+
         return RespuestaLista(
             exito=True,
             mensaje=f"Se encontraron {len(categorias_data)} categorías",
@@ -84,12 +80,13 @@ def listar_categorias_con_modelos_completo(
             pagina=1,
             por_pagina=len(categorias_data)
         )
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al listar categorías: {str(e)}"
         )
+
 
 @router.get("", response_model=RespuestaLista)
 def listar_categorias(
@@ -102,17 +99,17 @@ def listar_categorias(
         query = db.query(Categoria).options(
             joinedload(Categoria.lecciones),
             joinedload(Categoria.tipo_rel),
-            joinedload(Categoria.modelo_ia)  # ✅ NUEVO
+            joinedload(Categoria.modelo_ia)
         )
-        
+
         if activas_solo:
             query = query.filter(Categoria.activa == True)
-        
+
         if tipo_id:
             query = query.filter(Categoria.tipo_id == tipo_id)
-        
+
         categorias = query.order_by(Categoria.orden).all()
-        
+
         categorias_data = []
         for categoria in categorias:
             categorias_data.append({
@@ -136,7 +133,7 @@ def listar_categorias(
                 "fecha_creacion": categoria.fecha_creacion,
                 "fecha_actualizacion": categoria.fecha_actualizacion
             })
-        
+
         return RespuestaLista(
             exito=True,
             mensaje=f"Se encontraron {len(categorias_data)} categorías",
@@ -145,12 +142,13 @@ def listar_categorias(
             pagina=1,
             por_pagina=len(categorias_data)
         )
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al listar categorías: {str(e)}"
         )
+
 
 @router.get("/{categoria_id}", response_model=RespuestaAPI)
 def obtener_categoria(
@@ -163,13 +161,13 @@ def obtener_categoria(
             joinedload(Categoria.lecciones),
             joinedload(Categoria.tipo_rel)
         ).filter(Categoria.id == categoria_id).first()
-        
+
         if not categoria:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Categoría con ID {categoria_id} no encontrada"
             )
-        
+
         categoria_data = {
             "id": categoria.id,
             "nombre": categoria.nombre,
@@ -186,13 +184,13 @@ def obtener_categoria(
             "fecha_creacion": categoria.fecha_creacion,
             "fecha_actualizacion": categoria.fecha_actualizacion
         }
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje="Categoría obtenida exitosamente",
             datos=categoria_data
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -206,29 +204,29 @@ def obtener_categoria(
 def crear_categoria(
     categoria: CategoriaCrear,
     db: Session = Depends(obtener_bd),
-    usuario_actual = Depends(verificar_admin)
+    usuario_actual=Depends(verificar_admin)
 ):
     try:
         tipo = db.query(TipoCategoria).filter(
             TipoCategoria.id == categoria.tipo_id
         ).first()
-        
+
         if not tipo:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Tipo de categoría {categoria.tipo_id} no existe"
             )
-        
+
         existente = db.query(Categoria).filter(
             Categoria.nombre == categoria.nombre
         ).first()
-        
+
         if existente:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Ya existe una categoría con el nombre '{categoria.nombre}'"
             )
-        
+
         nueva_categoria = Categoria(
             nombre=categoria.nombre,
             tipo_id=categoria.tipo_id,
@@ -239,12 +237,10 @@ def crear_categoria(
             nivel_requerido=categoria.nivel_requerido or 1,
             activa=True
         )
-        
+
         db.add(nueva_categoria)
         db.flush()
-        
-        print(f"Categoría principal creada: ID={nueva_categoria.id}, nombre='{nueva_categoria.nombre}'")
-        
+
         nueva_categoria_dataset = CategoriaDataset(
             nombre=nueva_categoria.nombre,
             descripcion=nueva_categoria.descripcion,
@@ -252,14 +248,12 @@ def crear_categoria(
             activa=True,
             orden=nueva_categoria.orden
         )
-        
+
         db.add(nueva_categoria_dataset)
         db.commit()
         db.refresh(nueva_categoria)
         db.refresh(nueva_categoria_dataset)
-        
-        print(f"Categoría dataset creada: ID={nueva_categoria_dataset.id}, categoria_id={nueva_categoria_dataset.categoria_id}")
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje="Categoría creada exitosamente (incluye dataset)",
@@ -277,14 +271,11 @@ def crear_categoria(
                 "dataset_id": nueva_categoria_dataset.id
             }
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        import traceback
-        print(f"Error al crear categoría: {str(e)}")
-        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al crear categoría: {str(e)}"
@@ -303,13 +294,13 @@ def actualizar_categoria(
             joinedload(Categoria.lecciones),
             joinedload(Categoria.tipo_rel)
         ).filter(Categoria.id == categoria_id).first()
-        
+
         if not categoria:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Categoría con ID {categoria_id} no encontrada"
             )
-        
+
         if categoria_actualizar.nombre and categoria_actualizar.nombre != categoria.nombre:
             existe = db.query(Categoria).filter(
                 Categoria.nombre == categoria_actualizar.nombre,
@@ -320,32 +311,32 @@ def actualizar_categoria(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Ya existe una categoría con el nombre '{categoria_actualizar.nombre}'"
                 )
-        
+
         if categoria_actualizar.tipo_id and categoria_actualizar.tipo_id != categoria.tipo_id:
             tipo = db.query(TipoCategoria).filter(
                 TipoCategoria.id == categoria_actualizar.tipo_id
             ).first()
-            
+
             if not tipo:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"El tipo de categoría con ID {categoria_actualizar.tipo_id} no existe"
                 )
-            
+
             if not tipo.activo:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"El tipo '{tipo.etiqueta}' está inactivo"
                 )
-        
+
         datos_actualizacion = categoria_actualizar.dict(exclude_unset=True)
         for campo, valor in datos_actualizacion.items():
             setattr(categoria, campo, valor)
-        
+
         categoria_dataset = db.query(CategoriaDataset).filter(
             CategoriaDataset.categoria_id == categoria_id
         ).first()
-        
+
         if categoria_dataset:
             if categoria_actualizar.nombre is not None:
                 categoria_dataset.nombre = categoria_actualizar.nombre
@@ -355,11 +346,11 @@ def actualizar_categoria(
                 categoria_dataset.activa = categoria_actualizar.activa
             if categoria_actualizar.orden is not None:
                 categoria_dataset.orden = categoria_actualizar.orden
-        
+
         db.commit()
         db.refresh(categoria)
         db.refresh(categoria, ["tipo_rel"])
-        
+
         categoria_data = {
             "id": categoria.id,
             "nombre": categoria.nombre,
@@ -376,20 +367,17 @@ def actualizar_categoria(
             "fecha_creacion": categoria.fecha_creacion,
             "fecha_actualizacion": categoria.fecha_actualizacion
         }
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje=f"Categoría '{categoria.nombre}' actualizada exitosamente",
             datos=categoria_data
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        import traceback
-        print(f"Error al actualizar categoría: {str(e)}")
-        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al actualizar categoría: {str(e)}"
@@ -408,56 +396,65 @@ def eliminar_categoria(
             joinedload(Categoria.lecciones),
             joinedload(Categoria.tipo_rel)
         ).filter(Categoria.id == categoria_id).first()
-        
+
         if not categoria:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Categoría con ID {categoria_id} no encontrada"
             )
-        
+
         total_lecciones = len(categoria.lecciones)
-        
-        if total_lecciones > 0 and not forzar:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"La categoría tiene {total_lecciones} lección(es) asociada(s). Usa 'forzar=true' para desactivarla."
-            )
-        
+
         categoria_dataset = db.query(CategoriaDataset).filter(
             CategoriaDataset.categoria_id == categoria_id
         ).first()
-        
+
+        total_videos = 0
         if categoria_dataset:
-            db.delete(categoria_dataset)
-            print(f"Categoría dataset eliminada: ID={categoria_dataset.id}")
-        
-        if forzar and total_lecciones > 0:
+            total_videos = db.query(VideoDataset).filter(
+                VideoDataset.categoria_id == categoria_dataset.id
+            ).count()
+
+        tiene_dependencias = total_lecciones > 0 or total_videos > 0
+
+        if tiene_dependencias and not forzar:
+            detalle = []
+            if total_lecciones > 0:
+                detalle.append(f"{total_lecciones} lección(es)")
+            if total_videos > 0:
+                detalle.append(f"{total_videos} video(s) de dataset")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"La categoría tiene {' y '.join(detalle)} asociada(s). Usa 'forzar=true' para desactivarla."
+            )
+
+        if tiene_dependencias and forzar:
             categoria.activa = False
+            if categoria_dataset:
+                categoria_dataset.activa = False
             db.commit()
-            mensaje = f"Categoría desactivada (tenía {total_lecciones} lecciones asociadas)"
+            mensaje = "Categoría desactivada (tenía datos asociados que no se pueden borrar)"
         else:
+            if categoria_dataset:
+                db.delete(categoria_dataset)
             db.delete(categoria)
             db.commit()
             mensaje = "Categoría eliminada exitosamente"
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje=mensaje,
             datos=None
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        import traceback
-        print(f"Error al eliminar categoría: {str(e)}")
-        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al eliminar categoría: {str(e)}"
         )
-
 
 
 @router.patch("/{categoria_id}/toggle", response_model=RespuestaAPI)
@@ -471,27 +468,26 @@ def cambiar_estado_categoria(
             joinedload(Categoria.lecciones),
             joinedload(Categoria.tipo_rel)
         ).filter(Categoria.id == categoria_id).first()
-        
+
         if not categoria:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Categoría con ID {categoria_id} no encontrada"
             )
-        
+
         categoria.activa = not categoria.activa
-        
+
         categoria_dataset = db.query(CategoriaDataset).filter(
             CategoriaDataset.categoria_id == categoria_id
         ).first()
-        
+
         if categoria_dataset:
             categoria_dataset.activa = categoria.activa
-            print(f"Categoría dataset actualizada: ID={categoria_dataset.id}, activa={categoria.activa}")
-        
+
         db.commit()
         db.refresh(categoria)
         db.refresh(categoria, ["tipo_rel"])
-        
+
         categoria_data = {
             "id": categoria.id,
             "nombre": categoria.nombre,
@@ -508,21 +504,18 @@ def cambiar_estado_categoria(
             "fecha_creacion": categoria.fecha_creacion,
             "fecha_actualizacion": categoria.fecha_actualizacion
         }
-        
+
         estado = "activada" if categoria.activa else "desactivada"
         return RespuestaAPI(
             exito=True,
             mensaje=f"Categoría '{categoria.nombre}' {estado} exitosamente",
             datos=categoria_data
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        import traceback
-        print(f"Error al cambiar estado de categoría: {str(e)}")
-        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al cambiar estado de categoría: {str(e)}"
@@ -532,18 +525,18 @@ def cambiar_estado_categoria(
 @router.post("/sincronizar-dataset", response_model=RespuestaAPI)
 def sincronizar_categorias_dataset(
     db: Session = Depends(obtener_bd),
-    usuario_actual = Depends(verificar_admin)
+    usuario_actual=Depends(verificar_admin)
 ):
     try:
         categorias = db.query(Categoria).all()
         categorias_creadas = 0
         categorias_existentes = 0
-        
+
         for categoria in categorias:
             dataset_existe = db.query(CategoriaDataset).filter(
                 CategoriaDataset.categoria_id == categoria.id
             ).first()
-            
+
             if not dataset_existe:
                 nueva_categoria_dataset = CategoriaDataset(
                     nombre=categoria.nombre,
@@ -554,12 +547,11 @@ def sincronizar_categorias_dataset(
                 )
                 db.add(nueva_categoria_dataset)
                 categorias_creadas += 1
-                print(f"Categoría dataset creada para: {categoria.nombre}")
             else:
                 categorias_existentes += 1
-        
+
         db.commit()
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje=f"Sincronización completada: {categorias_creadas} creadas, {categorias_existentes} ya existían",
@@ -569,17 +561,14 @@ def sincronizar_categorias_dataset(
                 "total_categorias": len(categorias)
             }
         )
-        
+
     except Exception as e:
         db.rollback()
-        import traceback
-        print(f"Error al sincronizar: {str(e)}")
-        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al sincronizar: {str(e)}"
         )
-# Agregar al final de app/rutas/categorias.py
+
 
 @router.patch("/{categoria_id}/asignar-modelo", response_model=RespuestaAPI)
 def asignar_modelo_a_categoria(
@@ -588,19 +577,14 @@ def asignar_modelo_a_categoria(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(verificar_admin)
 ):
-    """
-    Asigna un modelo IA específico a una categoría
-    """
     try:
-        # Validar categoría
         categoria = db.query(Categoria).filter(Categoria.id == categoria_id).first()
         if not categoria:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Categoría {categoria_id} no encontrada"
             )
-        
-        # Validar modelo
+
         from app.modelos.entrenamiento import ModeloIA
         modelo = db.query(ModeloIA).filter(ModeloIA.id == modelo_id).first()
         if not modelo:
@@ -608,17 +592,16 @@ def asignar_modelo_a_categoria(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Modelo {modelo_id} no encontrado"
             )
-        
-        # Asignar modelo
+
         modelo_anterior_id = categoria.modelo_ia_id
         categoria.modelo_ia_id = modelo_id
         db.commit()
         db.refresh(categoria)
-        
+
         mensaje = f"Modelo '{modelo.nombre}' asignado a categoría '{categoria.nombre}'"
         if modelo_anterior_id:
             mensaje += f" (reemplazó modelo anterior ID: {modelo_anterior_id})"
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje=mensaje,
@@ -631,14 +614,11 @@ def asignar_modelo_a_categoria(
                 "modelo_anterior_id": modelo_anterior_id
             }
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
         db.rollback()
-        import traceback
-        print(f"Error asignando modelo: {str(e)}")
-        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error asignando modelo: {str(e)}"
@@ -651,9 +631,6 @@ def desasignar_modelo_de_categoria(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(verificar_admin)
 ):
-    """
-    Quita el modelo IA asignado de una categoría
-    """
     try:
         categoria = db.query(Categoria).filter(Categoria.id == categoria_id).first()
         if not categoria:
@@ -661,13 +638,13 @@ def desasignar_modelo_de_categoria(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Categoría {categoria_id} no encontrada"
             )
-        
+
         modelo_anterior_id = categoria.modelo_ia_id
         modelo_anterior_nombre = categoria.modelo_ia.nombre if categoria.modelo_ia else None
-        
+
         categoria.modelo_ia_id = None
         db.commit()
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje=f"Modelo '{modelo_anterior_nombre}' desasignado de categoría '{categoria.nombre}'",
@@ -677,7 +654,7 @@ def desasignar_modelo_de_categoria(
                 "modelo_anterior_nombre": modelo_anterior_nombre
             }
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -694,26 +671,22 @@ def asignar_modelos_en_lote(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(verificar_admin)
 ):
-    """
-    Asigna múltiples modelos a múltiples categorías en una sola operación
-    """
     try:
         asignaciones = request.asignaciones
-        print(f"📦 Asignaciones recibidas: {asignaciones}")
-        
+
         if not asignaciones:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No se proporcionaron asignaciones"
             )
-        
+
         asignaciones_exitosas = []
         asignaciones_fallidas = []
-        
+
         for asignacion in asignaciones:
             categoria_id = asignacion.categoria_id
-            modelo_id = asignacion.modelo_id  # ✅ Puede ser None
-            
+            modelo_id = asignacion.modelo_id
+
             try:
                 categoria = db.query(Categoria).filter(Categoria.id == categoria_id).first()
                 if not categoria:
@@ -722,14 +695,11 @@ def asignar_modelos_en_lote(
                         "error": "Categoría no encontrada"
                     })
                     continue
-                
-                # Guardar modelo anterior para el log
+
                 modelo_anterior_id = categoria.modelo_ia_id
                 modelo_anterior_nombre = categoria.modelo_ia.nombre if categoria.modelo_ia else None
-                
-                # ✅ Manejar tanto asignación como desasignación
+
                 if modelo_id is not None:
-                    # Validar que el modelo existe
                     from app.modelos.entrenamiento import ModeloIA
                     modelo = db.query(ModeloIA).filter(ModeloIA.id == modelo_id).first()
                     if not modelo:
@@ -738,17 +708,15 @@ def asignar_modelos_en_lote(
                             "error": f"Modelo {modelo_id} no encontrado"
                         })
                         continue
-                    
-                    # Asignar nuevo modelo
+
                     categoria.modelo_ia_id = modelo_id
                     accion = "asignado"
                     modelo_nombre = modelo.nombre
                 else:
-                    # Desasignar modelo (modelo_id es None)
                     categoria.modelo_ia_id = None
                     accion = "desasignado"
                     modelo_nombre = None
-                
+
                 asignaciones_exitosas.append({
                     "categoria_id": categoria_id,
                     "categoria_nombre": categoria.nombre,
@@ -758,24 +726,19 @@ def asignar_modelos_en_lote(
                     "modelo_anterior_nombre": modelo_anterior_nombre,
                     "accion": accion
                 })
-                
-                print(f"✅ {accion.capitalize()}: Categoría {categoria.nombre} -> Modelo {modelo_nombre}")
-                
+
             except Exception as e:
                 asignaciones_fallidas.append({
                     "categoria_id": categoria_id,
                     "error": str(e)
                 })
-                print(f"❌ Error en asignación {categoria_id}: {str(e)}")
-        
+
         db.commit()
-        
+
         mensaje = f"{len(asignaciones_exitosas)} asignaciones exitosas"
         if asignaciones_fallidas:
             mensaje += f", {len(asignaciones_fallidas)} fallidas"
-        
-        print(f"📊 Resultado: {mensaje}")
-        
+
         return RespuestaAPI(
             exito=True,
             mensaje=mensaje,
@@ -786,10 +749,9 @@ def asignar_modelos_en_lote(
                 "total_fallidas": len(asignaciones_fallidas)
             }
         )
-        
+
     except Exception as e:
         db.rollback()
-        print(f"💥 Error en asignación en lote: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error en asignación en lote: {str(e)}"

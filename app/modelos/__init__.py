@@ -10,7 +10,6 @@ from .token_recuperacion import TokenRecuperacion
 from .estudio import SesionEstudio
 from .dataset import CategoriaDataset, VideoDataset
 from .tipo_categoria import TipoCategoria
-from .lstm_video import SignLanguageLSTM , CNNFeatureExtractor , VideoDataset , SimpleLSTM
 
 __all__ = [
     "Usuario",

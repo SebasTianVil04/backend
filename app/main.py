@@ -119,6 +119,11 @@ try:
 except Exception as e:
     print(f"  Error categorias_dataset: {e}")
 
+try:
+    from app.rutas import senas_categoria
+    print("  senas_categoria OK")
+except Exception as e:
+    print(f"  Error senas_categoria: {e}")
 
 print("Todos los routers importados")
 
@@ -127,25 +132,14 @@ app = FastAPI(
     description="API para aprendizaje de Lengua de Señas Peruana",
     version="2.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
+    redirect_slashes=False
 )
 
 print("Configurando CORS...")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:4200",
-        "http://127.0.0.1:4200",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "https://sebastianvil04.github.io",
-        "http://38.56.216.65",
-        "http://38.56.216.65:4200",
-        "https://38.56.216.65"
-
-    ],
+    allow_origins=configuracion.allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=[
@@ -167,19 +161,13 @@ async def log_requests(request: Request, call_next):
     origin = request.headers.get("origin")
     method = request.method
     path = request.url.path
-    
+
     print(f"IN {method} {path} | Origin: {origin}")
-    
+
     response = await call_next(request)
-    
-    if origin:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, Origin, X-Requested-With"
-    
+
     print(f"OUT {method} {path} | Status: {response.status_code}")
-    
+
     return response
 
 def crear_directorios():
@@ -191,9 +179,10 @@ def crear_directorios():
         f"{configuracion.upload_dir}/imagenes_entrenamiento",
         "archivos_subidos",
         "archivos_subidos/videos_dataset",
-        "archivos_subidos/frames_dataset"
+        "archivos_subidos/frames_dataset",
+        "archivos_subidos/senas_referencia"
     ]
-    
+
     for directorio in directorios:
         os.makedirs(directorio, exist_ok=True)
         print(f"Directorio creado/verificado: {directorio}")
@@ -203,23 +192,23 @@ def crear_usuario_admin_por_defecto():
     from .modelos.usuario import Usuario
     from .utilidades.seguridad import obtener_hash_password
     from datetime import date
-    
+
     db = SessionLocal()
-    
+
     try:
         usuario_existente = db.query(Usuario).filter(
             Usuario.email == "svilchezviera1704@gmail.com"
         ).first()
-        
+
         if usuario_existente:
             print(f"Usuario ya existe: {usuario_existente.email}")
             print(f"Es admin: {usuario_existente.es_admin}")
             return
-        
+
         print("\n" + "=" * 60)
         print("CREANDO USUARIO ADMINISTRADOR POR DEFECTO")
         print("=" * 60)
-        
+
         admin = Usuario(
             tipo_usuario="peruano_mayor",
             email="svilchezviera1704@gmail.com",
@@ -235,11 +224,11 @@ def crear_usuario_admin_por_defecto():
             es_admin=True,
             verificado=True
         )
-        
+
         db.add(admin)
         db.commit()
         db.refresh(admin)
-        
+
         print("\nUSUARIO ADMINISTRADOR CREADO EXITOSAMENTE")
         print("=" * 60)
         print(f"Email: {admin.email}")
@@ -250,7 +239,7 @@ def crear_usuario_admin_por_defecto():
         print("=" * 60)
         print("IMPORTANTE: Cambia esta contraseña despues del primer inicio de sesion")
         print("=" * 60 + "\n")
-        
+
     except Exception as e:
         print(f"\nERROR al crear usuario administrador: {e}")
         import traceback
@@ -264,24 +253,24 @@ async def startup_event():
     print("=" * 50)
     print("INICIANDO SIGNAFREE API v2.0.0")
     print("=" * 50)
-    
+
     try:
         crear_directorios()
         print("Directorios verificados")
     except Exception as e:
         print(f"Error creando directorios: {e}")
-    
+
     try:
         crear_tablas()
         print("Base de datos verificada")
     except Exception as e:
         print(f"Error en base de datos: {e}")
-    
+
     try:
         crear_usuario_admin_por_defecto()
     except Exception as e:
         print(f"Error al crear usuario administrador: {e}")
-    
+
     print("SIGNAFREE API LISTA")
     print(f"Servidor: http://{configuracion.host}:{configuracion.port}")
     print(f"Documentacion: http://{configuracion.host}:{configuracion.port}/docs")
@@ -294,32 +283,24 @@ try:
         print(f"Archivos estaticos montados en /uploads desde: {upload_path}")
     else:
         print(f"Directorio de uploads no existe: {upload_path}")
-    
+
     archivos_subidos_path = Path("archivos_subidos")
-    if archivos_subidos_path.exists():
-        app.mount("/archivos_subidos", StaticFiles(directory=str(archivos_subidos_path)), name="archivos_subidos")
-        print(f"Archivos estaticos montados en /archivos_subidos desde: {archivos_subidos_path}")
-    else:
-        print(f"Directorio archivos_subidos no existe: {archivos_subidos_path}")
+    if not archivos_subidos_path.exists():
         archivos_subidos_path.mkdir(exist_ok=True)
         print(f"Directorio archivos_subidos creado: {archivos_subidos_path}")
-        
+
+    app.mount("/archivos_subidos", StaticFiles(directory=str(archivos_subidos_path)), name="archivos_subidos")
+    print(f"Archivos estaticos montados en /archivos_subidos desde: {archivos_subidos_path}")
+
+    senas_referencia_path = archivos_subidos_path / "senas_referencia"
+    senas_referencia_path.mkdir(parents=True, exist_ok=True)
+    app.mount("/archivos/senas_referencia", StaticFiles(directory=str(senas_referencia_path)), name="senas_referencia")
+    print(f"Archivos estaticos montados en /archivos/senas_referencia desde: {senas_referencia_path}")
+
 except Exception as e:
     print(f"Error montando archivos estaticos: {e}")
     import traceback
     traceback.print_exc()
-
-@app.options("/api/v1/progreso/clases/{clase_id}/practica")
-async def options_practica(clase_id: int):
-    return JSONResponse(
-        content={"message": "OK"},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Authorization",
-            "Access-Control-Max-Age": "3600",
-        }
-    )
 
 print("Registrando rutas...")
 app.include_router(autenticacion.router, prefix="/api/v1")
@@ -376,6 +357,9 @@ print("  Tipos Categoria")
 app.include_router(categorias_dataset.router, prefix="/api/v1")
 print("  Categorias Dataset")
 
+app.include_router(senas_categoria.router, prefix="/api/v1")
+print("  Senas Categoria")
+
 print("Todas las rutas registradas")
 
 @app.get("/", tags=["General"])
@@ -412,13 +396,13 @@ async def test_cors():
 async def test_archivos():
     archivos_subidos_path = Path("archivos_subidos")
     archivos = []
-    
+
     if archivos_subidos_path.exists():
         for root, dirs, files in os.walk(archivos_subidos_path):
             for file in files:
                 relative_path = Path(root) / file
                 archivos.append(str(relative_path.relative_to(archivos_subidos_path)))
-    
+
     return {
         "directorio_archivos_subidos": str(archivos_subidos_path.absolute()),
         "archivos_encontrados": archivos,
@@ -433,10 +417,6 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             "error": True,
             "mensaje": exc.detail,
             "codigo": exc.status_code
-        },
-        headers={
-            "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
-            "Access-Control-Allow-Credentials": "true",
         }
     )
 
@@ -444,10 +424,10 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 async def general_exception_handler(request: Request, exc: Exception):
     import traceback
     error_traceback = traceback.format_exc()
-    
+
     print(f"Error no manejado: {str(exc)}")
     print(error_traceback)
-    
+
     return JSONResponse(
         status_code=500,
         content={
@@ -455,20 +435,16 @@ async def general_exception_handler(request: Request, exc: Exception):
             "mensaje": f"Error interno: {str(exc)}",
             "detalle": error_traceback if configuracion.debug else None,
             "codigo": 500
-        },
-        headers={
-            "Access-Control-Allow-Origin": request.headers.get("origin", "*"),
-            "Access-Control-Allow-Credentials": "true",
         }
     )
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     print("=" * 50)
     print("Iniciando servidor con Uvicorn...")
     print("=" * 50)
-    
+
     uvicorn.run(
         "app.main:app",
         host=configuracion.host,

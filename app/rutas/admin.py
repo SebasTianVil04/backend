@@ -19,7 +19,7 @@ from app.modelos.examen import Examen
 from app.modelos.progreso import ProgresoLeccion as Progreso
 from app.modelos.entrenamiento import ModeloIA 
 from app.esquemas.modelo_ia_schemas import ModeloIASchema
-from app.servicios.entrenamiento_modelo import entrenamiento_service
+from app.servicios.servicio_entrenamiento import servicio_entrenamiento
 from app.servicios.archivos import archivo_service
 from app.esquemas.usuario_schemas import UsuarioRespuesta, EstadisticasUsuario
 from app.esquemas.respuesta_schemas import RespuestaAPI

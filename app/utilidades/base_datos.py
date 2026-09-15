@@ -64,7 +64,6 @@ def crear_tablas():
         from app.modelos.entrenamiento import Entrenamiento, ModeloIA
         from app.modelos.estudio import SesionEstudio
         from app.modelos.dataset import CategoriaDataset, VideoDataset, CalibracionUsuario
-        from app.modelos.lstm_video import SignLanguageLSTM , CNNFeatureExtractor , VideoDataset , SimpleLSTM
         from app.modelos.tipo_categoria import TipoCategoria
         from app.modelos.modelo_adaptativo import ModeloAdaptativoSenas
         
