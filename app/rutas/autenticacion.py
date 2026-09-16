@@ -108,7 +108,6 @@ async def registrar_usuario(
             direccion=datos_usuario.direccion,
             fecha_nacimiento=datos_usuario.fecha_nacimiento,
             activo=True,
-            es_admin=False,
             verificado=True
         )
         
@@ -152,9 +151,8 @@ async def registrar_usuario(
         "telefono": nuevo_usuario.telefono,
         "fecha_nacimiento": nuevo_usuario.fecha_nacimiento.isoformat() if nuevo_usuario.fecha_nacimiento else None,
         "direccion": nuevo_usuario.direccion,
-        "rol": "admin" if nuevo_usuario.es_admin else "usuario",
+        "rol": nuevo_usuario.rol.value,
         "activo": nuevo_usuario.activo,
-        "es_admin": nuevo_usuario.es_admin,
         "verificado": nuevo_usuario.verificado,
         "fecha_registro": nuevo_usuario.fecha_creacion.isoformat() if nuevo_usuario.fecha_creacion else None,
         "fecha_creacion": nuevo_usuario.fecha_creacion,
@@ -218,9 +216,8 @@ async def login_usuario(
         "telefono": usuario.telefono,
         "fecha_nacimiento": usuario.fecha_nacimiento.isoformat() if usuario.fecha_nacimiento else None,
         "direccion": usuario.direccion,
-        "rol": "admin" if usuario.es_admin else "usuario",
+        "rol": usuario.rol.value,
         "activo": usuario.activo,
-        "es_admin": usuario.es_admin,
         "verificado": usuario.verificado,
         "fecha_registro": usuario.fecha_creacion.isoformat() if usuario.fecha_creacion else None,
         "fecha_creacion": usuario.fecha_creacion,

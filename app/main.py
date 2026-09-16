@@ -187,67 +187,6 @@ def crear_directorios():
         os.makedirs(directorio, exist_ok=True)
         print(f"Directorio creado/verificado: {directorio}")
 
-def crear_usuario_admin_por_defecto():
-    from .utilidades.base_datos import SessionLocal
-    from .modelos.usuario import Usuario
-    from .utilidades.seguridad import obtener_hash_password
-    from datetime import date
-
-    db = SessionLocal()
-
-    try:
-        usuario_existente = db.query(Usuario).filter(
-            Usuario.email == "svilchezviera1704@gmail.com"
-        ).first()
-
-        if usuario_existente:
-            print(f"Usuario ya existe: {usuario_existente.email}")
-            print(f"Es admin: {usuario_existente.es_admin}")
-            return
-
-        print("\n" + "=" * 60)
-        print("CREANDO USUARIO ADMINISTRADOR POR DEFECTO")
-        print("=" * 60)
-
-        admin = Usuario(
-            tipo_usuario="peruano_mayor",
-            email="svilchezviera1704@gmail.com",
-            password_hash=obtener_hash_password("17Alexander%"),
-            dni="76009799",
-            nombres="SEBASTIAN ALEXANDER",
-            apellido_paterno="VILCHEZ",
-            apellido_materno="VIERA",
-            telefono="+51940964458",
-            direccion="Ah 12 de Octubre 123, Lima, Peru",
-            fecha_nacimiento=date(2001, 4, 17),
-            activo=True,
-            es_admin=True,
-            verificado=True
-        )
-
-        db.add(admin)
-        db.commit()
-        db.refresh(admin)
-
-        print("\nUSUARIO ADMINISTRADOR CREADO EXITOSAMENTE")
-        print("=" * 60)
-        print(f"Email: {admin.email}")
-        print(f"Password: 17Alexander%")
-        print(f"ID: {admin.id}")
-        print(f"Nombres: {admin.nombre_completo}")
-        print(f"Es admin: {admin.es_admin}")
-        print("=" * 60)
-        print("IMPORTANTE: Cambia esta contraseña despues del primer inicio de sesion")
-        print("=" * 60 + "\n")
-
-    except Exception as e:
-        print(f"\nERROR al crear usuario administrador: {e}")
-        import traceback
-        traceback.print_exc()
-        db.rollback()
-    finally:
-        db.close()
-
 @app.on_event("startup")
 async def startup_event():
     print("=" * 50)
@@ -265,11 +204,6 @@ async def startup_event():
         print("Base de datos verificada")
     except Exception as e:
         print(f"Error en base de datos: {e}")
-
-    try:
-        crear_usuario_admin_por_defecto()
-    except Exception as e:
-        print(f"Error al crear usuario administrador: {e}")
 
     print("SIGNAFREE API LISTA")
     print(f"Servidor: http://{configuracion.host}:{configuracion.port}")

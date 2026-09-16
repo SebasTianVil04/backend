@@ -836,7 +836,7 @@ async def obtener_ranking(
             .filter(
                 and_(
                     Usuario.activo.is_(True),
-                    Usuario.es_admin.is_(False),
+                    Usuario.rol != "admin",
                 )
             )
             .order_by(puntos_totales_col.desc())
@@ -876,6 +876,7 @@ async def obtener_ranking(
                     else 0,
                     "posicion": posicion,
                     "avatar_url": None,
+                    "es_usuario_actual": row.id == usuario_actual.id,
                     "desglose_puntos": {
                         "puntos_clases": puntos_clases,
                         "puntos_examenes": puntos_examenes,
@@ -884,7 +885,7 @@ async def obtener_ranking(
                 }
             )
 
-        if not usuario_actual.es_admin:
+        if usuario_actual.rol != "admin":
             usuario_en_ranking = any(
                 user["usuario_id"] == usuario_actual.id for user in ranking_data
             )
@@ -915,7 +916,7 @@ async def obtener_ranking(
                     .filter(
                         and_(
                             Usuario.activo.is_(True),
-                            Usuario.es_admin.is_(False),
+                            Usuario.rol != "admin",
                             Usuario.id != usuario_actual.id,
                         )
                     )
@@ -946,6 +947,7 @@ async def obtener_ranking(
                         "desglose_puntos": {
                             "puntos_clases": totales_usuario["puntos_clases"],
                             "puntos_examenes": totales_usuario["puntos_examenes"],
+                            "xp_total": totales_usuario["xp_total"],
                         },
                     }
                 )
@@ -964,7 +966,6 @@ async def obtener_ranking(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al obtener ranking: {str(e)}",
         )
-
 
 @router.get("/usuario/estadisticas-detalladas", response_model=RespuestaAPI)
 async def obtener_estadisticas_detalladas_usuario(

@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Date, ForeignKey
+# app/modelos/usuario.py
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Date, ForeignKey, Enum as SQLEnum
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from ..utilidades.base_datos import Base
@@ -12,12 +13,28 @@ class TipoUsuario(str, enum.Enum):
     EXTRANJERO = "extranjero"
 
 
+class RolUsuario(str, enum.Enum):
+    ADMIN = "admin"
+    USUARIO = "usuario"
+
+
 class Usuario(AuditoriaMixin, Base):
     __tablename__ = "usuarios"
 
     id = Column(Integer, primary_key=True, index=True)
 
     tipo_usuario = Column(String(20), nullable=False, default="peruano_mayor")
+    rol = Column(
+        SQLEnum(
+            RolUsuario,
+            name="rol_usuario",
+            native_enum=False,
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+        ),
+        nullable=False,
+        default=RolUsuario.USUARIO,
+        index=True,
+    )
 
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(512), nullable=False)
@@ -34,7 +51,6 @@ class Usuario(AuditoriaMixin, Base):
     fecha_nacimiento = Column(Date, nullable=True)
 
     activo = Column(Boolean, default=True)
-    es_admin = Column(Boolean, default=False)
     verificado = Column(Boolean, default=False)
 
     progresos_clase = relationship("ProgresoClase", back_populates="usuario", cascade="all, delete-orphan", foreign_keys="ProgresoClase.usuario_id")
@@ -51,10 +67,6 @@ class Usuario(AuditoriaMixin, Base):
         return f"{self.nombres} {self.apellido_paterno} {self.apellido_materno}"
 
     @property
-    def rol(self):
-        return "admin" if self.es_admin else "usuario"
-
-    @property
     def documento_identidad(self):
         if self.tipo_usuario == "extranjero":
             return self.pasaporte
@@ -64,26 +76,21 @@ class Usuario(AuditoriaMixin, Base):
     def edad(self):
         if not self.fecha_nacimiento:
             return None
-
         from datetime import date
         hoy = date.today()
         edad = hoy.year - self.fecha_nacimiento.year
-
         if hoy.month < self.fecha_nacimiento.month or \
            (hoy.month == self.fecha_nacimiento.month and hoy.day < self.fecha_nacimiento.day):
             edad -= 1
-
         return edad
 
     @property
     def racha_actual(self):
         if not self.ultima_practica:
             return 0
-
         from datetime import datetime, timedelta
         hoy = datetime.now().date()
         ultima_fecha = self.ultima_practica.date()
-
         if ultima_fecha == hoy:
             return getattr(self, '_racha_cache', 1)
         elif ultima_fecha == hoy - timedelta(days=1):
@@ -100,33 +107,29 @@ class Usuario(AuditoriaMixin, Base):
     def telefono_formateado(self):
         if not self.telefono:
             return None
-
         if self.telefono.startswith('+'):
             codigo_pais = self.telefono[:3]
             numero = self.telefono[3:]
-
             if len(numero) == 9:
                 return f"{codigo_pais} {numero[:3]} {numero[3:6]} {numero[6:]}"
             else:
                 return f"{codigo_pais} {numero}"
-
         return self.telefono
+
+    def tiene_rol(self, *roles: RolUsuario) -> bool:
+        return self.rol in roles
 
     def validar_edad_con_tipo(self):
         edad = self.edad
         if edad is None:
             return False
-
         if self.tipo_usuario == "peruano_menor" and edad >= 18:
             return False
-
         if self.tipo_usuario == "peruano_mayor" and edad < 18:
             return False
-
         if self.tipo_usuario == "extranjero" and edad < 18:
             return False
-
         return True
 
     def __repr__(self):
-        return f"<Usuario(email={self.email}, tipo={self.tipo_usuario}, edad={self.edad})>"
+        return f"<Usuario(email={self.email}, rol={self.rol}, tipo={self.tipo_usuario})>"

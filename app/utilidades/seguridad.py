@@ -1,3 +1,4 @@
+# app/utilidades/seguridad.py
 import hashlib
 import logging
 import uuid
@@ -13,7 +14,7 @@ from sqlalchemy.orm import Session
 from .auditoria import marcar_usuario_actual
 from .base_datos import obtener_bd
 from .configuracion import configuracion
-from ..modelos.usuario import Usuario
+from ..modelos.usuario import Usuario, RolUsuario
 
 logger = logging.getLogger("signafree.seguridad")
 
@@ -119,15 +120,20 @@ def obtener_usuario_actual(
     return _obtener_usuario_por_email(email, bd)
 
 
-def verificar_admin(usuario_actual: Usuario = Depends(obtener_usuario_actual)) -> Usuario:
-    if not usuario_actual.es_admin:
-        logger.warning("Acceso admin denegado: usuario_id=%s", usuario_actual.id)
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes permisos de administrador",
-        )
-    return usuario_actual
+def requiere_roles(*roles_permitidos: RolUsuario):
+    def dependencia(usuario_actual: Usuario = Depends(obtener_usuario_actual)) -> Usuario:
+        if not usuario_actual.tiene_rol(*roles_permitidos):
+            logger.warning(
+                "Acceso denegado: usuario_id=%s rol=%s roles_requeridos=%s",
+                usuario_actual.id, usuario_actual.rol, [r.value for r in roles_permitidos]
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos suficientes",
+            )
+        return usuario_actual
+    return dependencia
 
 
-def verificar_token_admin(usuario_actual: Usuario = Depends(verificar_admin)) -> Usuario:
-    return usuario_actual
+verificar_admin = requiere_roles(RolUsuario.ADMIN)
+verificar_token_admin = verificar_admin
