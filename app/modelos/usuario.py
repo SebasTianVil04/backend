@@ -1,5 +1,4 @@
-# app/modelos/usuario.py
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Date, ForeignKey, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Date, ForeignKey
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from ..utilidades.base_datos import Base
@@ -13,28 +12,15 @@ class TipoUsuario(str, enum.Enum):
     EXTRANJERO = "extranjero"
 
 
-class RolUsuario(str, enum.Enum):
-    ADMIN = "admin"
-    USUARIO = "usuario"
-
-
 class Usuario(AuditoriaMixin, Base):
     __tablename__ = "usuarios"
 
     id = Column(Integer, primary_key=True, index=True)
 
     tipo_usuario = Column(String(20), nullable=False, default="peruano_mayor")
-    rol = Column(
-        SQLEnum(
-            RolUsuario,
-            name="rol_usuario",
-            native_enum=False,
-            values_callable=lambda enum_cls: [e.value for e in enum_cls],
-        ),
-        nullable=False,
-        default=RolUsuario.USUARIO,
-        index=True,
-    )
+
+    rol_id = Column(Integer, ForeignKey("roles.id"), nullable=False, index=True)
+    rol = relationship("Rol", back_populates="usuarios", lazy="joined")
 
     email = Column(String(255), unique=True, index=True, nullable=False)
     password_hash = Column(String(512), nullable=False)
@@ -116,8 +102,21 @@ class Usuario(AuditoriaMixin, Base):
                 return f"{codigo_pais} {numero}"
         return self.telefono
 
-    def tiene_rol(self, *roles: RolUsuario) -> bool:
-        return self.rol in roles
+    @property
+    def es_admin(self) -> bool:
+        return self.rol is not None and self.rol.codigo == "admin"
+
+    @property
+    def permisos(self):
+        if not self.rol:
+            return []
+        return [p.codigo for p in self.rol.permisos]
+
+    def tiene_rol(self, *codigos: str) -> bool:
+        return self.rol is not None and self.rol.codigo in codigos
+
+    def tiene_permiso(self, codigo_permiso: str) -> bool:
+        return self.rol is not None and self.rol.tiene_permiso(codigo_permiso)
 
     def validar_edad_con_tipo(self):
         edad = self.edad
@@ -132,4 +131,4 @@ class Usuario(AuditoriaMixin, Base):
         return True
 
     def __repr__(self):
-        return f"<Usuario(email={self.email}, rol={self.rol}, tipo={self.tipo_usuario})>"
+        return f"<Usuario(email={self.email}, rol_id={self.rol_id}, tipo={self.tipo_usuario})>"

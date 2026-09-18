@@ -16,6 +16,7 @@ from ..modelos.examen import Examen, ResultadoExamen
 from ..modelos.leccion import Leccion
 from ..modelos.progreso import ProgresoClase, ProgresoLeccion
 from ..modelos.usuario import Usuario
+from ..modelos.rol import Rol
 from ..utilidades.base_datos import obtener_bd
 from ..utilidades.seguridad import obtener_usuario_actual
 
@@ -833,10 +834,11 @@ async def obtener_ranking(
                 puntos_examenes_sq, Usuario.id == puntos_examenes_sq.c.usuario_id
             )
             .outerjoin(xp_clases_sq, Usuario.id == xp_clases_sq.c.usuario_id)
+            .join(Rol, Usuario.rol_id == Rol.id)
             .filter(
                 and_(
                     Usuario.activo.is_(True),
-                    Usuario.rol != "admin",
+                    Rol.codigo != "admin",
                 )
             )
             .order_by(puntos_totales_col.desc())
@@ -885,7 +887,7 @@ async def obtener_ranking(
                 }
             )
 
-        if usuario_actual.rol != "admin":
+        if not usuario_actual.es_admin:
             usuario_en_ranking = any(
                 user["usuario_id"] == usuario_actual.id for user in ranking_data
             )
@@ -905,6 +907,7 @@ async def obtener_ranking(
                 usuarios_con_mas_puntos = (
                     db.query(Usuario.id)
                     .select_from(Usuario)
+                    .join(Rol, Usuario.rol_id == Rol.id)
                     .outerjoin(
                         puntos_clases_sq,
                         Usuario.id == puntos_clases_sq.c.usuario_id,
@@ -916,7 +919,7 @@ async def obtener_ranking(
                     .filter(
                         and_(
                             Usuario.activo.is_(True),
-                            Usuario.rol != "admin",
+                            Rol.codigo != "admin",
                             Usuario.id != usuario_actual.id,
                         )
                     )

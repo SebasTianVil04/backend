@@ -3,7 +3,8 @@ from sqlalchemy.orm import Session, joinedload
 from typing import List, Dict, Optional
 from app.modelos.dataset import CategoriaDataset, VideoDataset
 from ..utilidades.base_datos import obtener_bd
-from ..utilidades.seguridad import obtener_usuario_actual, verificar_admin
+from ..utilidades.seguridad import obtener_usuario_actual
+from ..dependencias.permisos import requiere_permiso
 from ..modelos.usuario import Usuario
 from ..modelos.categoria import Categoria
 from ..modelos.tipo_categoria import TipoCategoria
@@ -204,7 +205,7 @@ def obtener_categoria(
 def crear_categoria(
     categoria: CategoriaCrear,
     db: Session = Depends(obtener_bd),
-    usuario_actual=Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar"))
 ):
     try:
         tipo = db.query(TipoCategoria).filter(
@@ -287,7 +288,7 @@ def actualizar_categoria(
     categoria_id: int,
     categoria_actualizar: CategoriaActualizar,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar"))
 ):
     try:
         categoria = db.query(Categoria).options(
@@ -388,7 +389,7 @@ def actualizar_categoria(
 def eliminar_categoria(
     categoria_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar")),
     forzar: bool = False
 ):
     try:
@@ -461,7 +462,7 @@ def eliminar_categoria(
 def cambiar_estado_categoria(
     categoria_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar"))
 ):
     try:
         categoria = db.query(Categoria).options(
@@ -525,7 +526,7 @@ def cambiar_estado_categoria(
 @router.post("/sincronizar-dataset", response_model=RespuestaAPI)
 def sincronizar_categorias_dataset(
     db: Session = Depends(obtener_bd),
-    usuario_actual=Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar"))
 ):
     try:
         categorias = db.query(Categoria).all()
@@ -575,7 +576,7 @@ def asignar_modelo_a_categoria(
     categoria_id: int,
     modelo_id: int = Query(..., description="ID del modelo a asignar"),
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar"))
 ):
     try:
         categoria = db.query(Categoria).filter(Categoria.id == categoria_id).first()
@@ -629,7 +630,7 @@ def asignar_modelo_a_categoria(
 def desasignar_modelo_de_categoria(
     categoria_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar"))
 ):
     try:
         categoria = db.query(Categoria).filter(Categoria.id == categoria_id).first()
@@ -669,7 +670,7 @@ def desasignar_modelo_de_categoria(
 def asignar_modelos_en_lote(
     request: AsignacionesLoteRequest,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar"))
 ):
     try:
         asignaciones = request.asignaciones

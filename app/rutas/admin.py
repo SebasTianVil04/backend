@@ -12,8 +12,9 @@ import time
 
 from app.modelos.dataset import VideoDataset
 from app.utilidades.base_datos import obtener_bd
-from app.utilidades.seguridad import verificar_token_admin, verificar_admin
-from app.modelos.usuario import Usuario, RolUsuario
+from app.dependencias.permisos import requiere_permiso
+from app.modelos.usuario import Usuario
+from app.modelos.rol import Rol
 from app.modelos.leccion import Leccion
 from app.modelos.examen import Examen
 from app.modelos.progreso import ProgresoLeccion as Progreso
@@ -42,7 +43,7 @@ class ActivarModeloRequest(BaseModel):
 
 @router.get("/dashboard", response_model=Dict[str, Any])
 async def obtener_dashboard(
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.dashboard.ver")),
     bd: Session = Depends(obtener_bd)
 ):
     try:
@@ -109,7 +110,8 @@ async def obtener_dashboard(
 @router.delete("/modelos/{nombre_modelo}", response_model=RespuestaAPI, status_code=200)
 async def eliminar_modelo(
     nombre_modelo: str,
-    eliminar_videos: bool = Query(False, description="Si True, elimina tambien los videos asociados"),
+    eliminar_videos: bool = Query(False),
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
     db: Session = Depends(obtener_bd)
 ):
     modelo = None
@@ -306,10 +308,17 @@ async def eliminar_modelo(
 async def listar_usuarios(
     skip: int = 0,
     limit: int = 100,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.usuarios.listar")),
     bd: Session = Depends(obtener_bd)
 ):
-    usuarios = bd.query(Usuario).filter(Usuario.rol == RolUsuario.USUARIO).offset(skip).limit(limit).all()
+    usuarios = (
+        bd.query(Usuario)
+        .join(Rol, Usuario.rol_id == Rol.id)
+        .filter(Rol.codigo != "admin")
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
     usuarios_serializados = []
     for usuario in usuarios:
@@ -326,7 +335,8 @@ async def listar_usuarios(
             "telefono": usuario.telefono,
             "fecha_nacimiento": usuario.fecha_nacimiento.isoformat() if usuario.fecha_nacimiento else None,
             "direccion": usuario.direccion,
-            "rol": usuario.rol.value,
+            "rol": usuario.rol,
+            "permisos": usuario.permisos,
             "activo": usuario.activo,
             "verificado": usuario.verificado,
             "fecha_registro": usuario.fecha_creacion.isoformat() if usuario.fecha_creacion else None,
@@ -341,7 +351,7 @@ async def listar_usuarios(
 @router.get("/usuarios/{usuario_id}", response_model=UsuarioRespuesta)
 async def obtener_usuario_por_id(
     usuario_id: int,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.usuarios.ver")),
     db: Session = Depends(obtener_bd)
 ):
     usuario = db.query(Usuario).filter(Usuario.id == usuario_id).first()
@@ -367,7 +377,8 @@ async def obtener_usuario_por_id(
         "telefono": usuario.telefono,
         "fecha_nacimiento": usuario.fecha_nacimiento.isoformat() if usuario.fecha_nacimiento else None,
         "direccion": usuario.direccion,
-        "rol": usuario.rol.value,
+        "rol": usuario.rol,
+        "permisos": usuario.permisos,
         "activo": usuario.activo,
         "verificado": usuario.verificado,
         "fecha_creacion": usuario.fecha_creacion,
@@ -385,7 +396,7 @@ async def actualizar_usuario(
     telefono: Optional[str] = None,
     direccion: Optional[str] = None,
     fecha_nacimiento: Optional[str] = None,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.usuarios.editar")),
     db: Session = Depends(obtener_bd)
 ):
     try:
@@ -501,7 +512,7 @@ async def actualizar_usuario(
             "telefono": usuario.telefono,
             "fecha_nacimiento": usuario.fecha_nacimiento.isoformat() if usuario.fecha_nacimiento else None,
             "direccion": usuario.direccion,
-            "rol": usuario.rol.value,
+            "rol": usuario.rol.codigo,
             "activo": usuario.activo,
             "verificado": usuario.verificado,
             "fecha_creacion": usuario.fecha_creacion,
@@ -531,8 +542,8 @@ async def actualizar_usuario(
 @router.put("/usuarios/{usuario_id}/rol", response_model=RespuestaAPI)
 async def asignar_rol(
     usuario_id: int,
-    rol: RolUsuario,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    rol_id: int = Query(...),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.usuarios.asignar_rol")),
     db: Session = Depends(obtener_bd)
 ):
     try:
@@ -544,19 +555,27 @@ async def asignar_rol(
                 detail="Usuario no encontrado"
             )
 
-        if usuario.id == usuario_actual.id and rol != RolUsuario.ADMIN:
+        nuevo_rol = db.query(Rol).filter(Rol.id == rol_id, Rol.activo == True).first()
+
+        if not nuevo_rol:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El rol con id '{rol_id}' no existe o está inactivo"
+            )
+
+        if usuario.id == usuario_actual.id and nuevo_rol.codigo != "admin":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No puedes quitarte el rol de administrador a ti mismo"
             )
 
-        usuario.rol = rol
+        usuario.rol_id = nuevo_rol.id
         db.commit()
 
         return RespuestaAPI(
             exito=True,
-            mensaje=f"Rol actualizado a {rol.value} exitosamente",
-            datos={"usuario_id": usuario_id, "rol": rol.value}
+            mensaje=f"Rol actualizado a {nuevo_rol.codigo} exitosamente",
+            datos={"usuario_id": usuario_id, "rol_id": nuevo_rol.id, "rol": nuevo_rol.codigo}
         )
 
     except HTTPException:
@@ -572,7 +591,7 @@ async def asignar_rol(
 @router.delete("/usuarios/{usuario_id}", response_model=RespuestaAPI)
 async def eliminar_usuario(
     usuario_id: int,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.usuarios.eliminar")),
     db: Session = Depends(obtener_bd)
 ):
     try:
@@ -618,7 +637,7 @@ async def eliminar_usuario(
 @router.get("/usuarios/{usuario_id}/estadisticas", response_model=EstadisticasUsuario)
 async def obtener_estadisticas_usuario(
     usuario_id: int,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.usuarios.ver_estadisticas")),
     bd: Session = Depends(obtener_bd)
 ):
     usuario = bd.query(Usuario).filter(Usuario.id == usuario_id).first()
@@ -705,7 +724,7 @@ async def obtener_estadisticas_usuario(
 async def cambiar_estado_usuario(
     usuario_id: int,
     activo: bool,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.usuarios.cambiar_estado")),
     bd: Session = Depends(obtener_bd)
 ):
     usuario = bd.query(Usuario).filter(Usuario.id == usuario_id).first()
@@ -728,7 +747,7 @@ async def cambiar_estado_usuario(
 async def subir_contenido_leccion(
     leccion_id: int,
     archivo: UploadFile = File(...),
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("lecciones.editar")),
     bd: Session = Depends(obtener_bd)
 ):
     leccion = bd.query(Leccion).filter(Leccion.id == leccion_id).first()
@@ -765,7 +784,7 @@ async def subir_contenido_leccion(
 
 @router.post("/modelo/entrenar", response_model=RespuestaAPI)
 async def iniciar_entrenamiento_modelo(
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
     bd: Session = Depends(obtener_bd)
 ):
     try:
@@ -784,7 +803,7 @@ async def iniciar_entrenamiento_modelo(
 
 @router.get("/modelo/estado", response_model=RespuestaAPI)
 async def obtener_estado_modelo(
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
     bd: Session = Depends(obtener_bd)
 ):
     try:
@@ -839,7 +858,7 @@ async def obtener_estado_modelo(
 @router.post("/modelo/toggle", response_model=RespuestaAPI)
 async def toggle_modelo(
     request: ActivarModeloRequest,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
     bd: Session = Depends(obtener_bd)
 ):
     try:
@@ -874,7 +893,7 @@ async def toggle_modelo(
 
 @router.get("/modelos", response_model=RespuestaAPI)
 async def listar_modelos(
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
     bd: Session = Depends(obtener_bd)
 ):
     try:
@@ -962,7 +981,7 @@ def _evaluar_calidad_modelo(accuracy: float) -> str:
 @router.post("/modelo/activar", response_model=RespuestaAPI)
 async def activar_modelo(
     request: ActivarModeloRequest,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
     bd: Session = Depends(obtener_bd)
 ):
     try:
@@ -1049,7 +1068,7 @@ def _crear_modelo_desde_archivo(nombre_modelo: str, bd: Session) -> ModeloIA:
 async def subir_datos_entrenamiento(
     archivos: List[UploadFile] = File(...),
     categoria: str = "general",
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.gestionar"))
 ):
     try:
         rutas_guardadas = []
@@ -1080,7 +1099,7 @@ async def subir_datos_entrenamiento(
 async def generar_reporte_uso(
     fecha_inicio: str = None,
     fecha_fin: str = None,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.reportes.ver")),
     bd: Session = Depends(obtener_bd)
 ):
     try:
@@ -1241,7 +1260,7 @@ async def generar_reporte_uso(
 
 @router.delete("/limpiar-archivos-temp", response_model=RespuestaAPI)
 async def limpiar_archivos_temporales(
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.archivos.limpiar"))
 ):
     try:
         temp_dir = "archivos_subidos/temp"
@@ -1273,7 +1292,7 @@ async def limpiar_archivos_temporales(
 @router.get("/usuarios/{usuario_id}/progreso-detallado", response_model=RespuestaAPI)
 async def obtener_progreso_detallado_usuario(
     usuario_id: int,
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.usuarios.ver_estadisticas")),
     bd: Session = Depends(obtener_bd)
 ):
     try:
@@ -1339,7 +1358,7 @@ async def obtener_progreso_detallado_usuario(
 
 @router.get("/estadisticas-entrenamiento", response_model=RespuestaAPI)
 async def obtener_estadisticas_entrenamiento(
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar"))
 ):
     try:
         estadisticas = servicio_entrenamiento.obtener_estadisticas_dataset()
@@ -1364,6 +1383,7 @@ async def obtener_estadisticas_entrenamiento(
 @router.post("/modelos/activar-multiples")
 async def activar_multiples_modelos(
     request: dict,
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
     db: Session = Depends(obtener_bd)
 ):
     try:
@@ -1412,7 +1432,10 @@ async def activar_multiples_modelos(
 
 
 @router.post("/modelos/desactivar-todos")
-async def desactivar_todos_modelos(db: Session = Depends(obtener_bd)):
+async def desactivar_todos_modelos(
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
+    db: Session = Depends(obtener_bd)
+):
     try:
         modelos_activos = db.query(ModeloIA).filter(ModeloIA.activo == True).all()
         total = len(modelos_activos)
@@ -1431,7 +1454,10 @@ async def desactivar_todos_modelos(db: Session = Depends(obtener_bd)):
 
 
 @router.get("/modelos/activos/ensemble")
-async def obtener_config_ensemble(db: Session = Depends(obtener_bd)):
+async def obtener_config_ensemble(
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
+    db: Session = Depends(obtener_bd)
+):
     try:
         modelos = db.query(ModeloIA).filter(ModeloIA.activo == True).all()
 
@@ -1465,6 +1491,7 @@ async def obtener_config_ensemble(db: Session = Depends(obtener_bd)):
 @router.get("/modelos/{nombre_modelo}/videos")
 async def obtener_videos_modelo(
     nombre_modelo: str,
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
     db: Session = Depends(obtener_bd)
 ):
     modelo = db.query(ModeloIA).filter(ModeloIA.nombre == nombre_modelo).first()

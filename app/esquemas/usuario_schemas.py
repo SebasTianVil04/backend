@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, field_validator, validator
+from pydantic import BaseModel, EmailStr, field_validator
 from typing import Optional, Tuple, List, Literal
 from datetime import datetime, date
 import re
@@ -66,6 +66,15 @@ class UsuarioLogin(BaseModel):
     password: str
 
 
+class RolResumen(BaseModel):
+    id: int
+    codigo: str
+    nombre: str
+
+    class Config:
+        from_attributes = True
+
+
 class UsuarioRespuesta(BaseModel):
     id: int
     tipo_usuario: Literal['peruano_mayor', 'peruano_menor', 'extranjero']
@@ -79,7 +88,8 @@ class UsuarioRespuesta(BaseModel):
     telefono: Optional[str] = None
     fecha_nacimiento: Optional[str] = None
     direccion: Optional[str] = None
-    rol: str
+    rol: RolResumen
+    permisos: List[str] = []
     activo: bool
     verificado: bool
     fecha_registro: Optional[str] = None
@@ -152,7 +162,8 @@ class CambiarPassword(BaseModel):
     password_actual: str
     password_nueva: str
 
-    @validator('password_nueva')
+    @field_validator('password_nueva')
+    @classmethod
     def validar_password_nueva(cls, v):
         if len(v) > MAX_PASSWORD_LENGTH:
             raise ValueError(f'La contraseña no puede exceder {MAX_PASSWORD_LENGTH} caracteres')

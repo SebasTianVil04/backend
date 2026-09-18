@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.servicios.estadisticas_servicio import EstadisticasServicio
 from app.utilidades.base_datos import get_db
+from app.dependencias.permisos import requiere_permiso
+from app.modelos.usuario import Usuario
 
 
 logger = logging.getLogger(__name__)
@@ -107,6 +109,7 @@ async def obtener_estadisticas(
     fecha_inicio: Optional[str] = Query(None, description="Fecha inicio (YYYY-MM-DD)"),
     fecha_fin: Optional[str] = Query(None, description="Fecha fin (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.reportes.ver")),
 ):
     inicio_dt, fin_dt = _resolver_rango(fecha_inicio, fecha_fin)
 
@@ -127,6 +130,7 @@ async def obtener_estadisticas_rango_fechas(
     fecha_inicio: str = Query(..., description="Fecha inicio (YYYY-MM-DD)"),
     fecha_fin: str = Query(..., description="Fecha fin (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.reportes.ver")),
 ):
     inicio_dt, fin_dt = _resolver_rango(fecha_inicio, fecha_fin)
 

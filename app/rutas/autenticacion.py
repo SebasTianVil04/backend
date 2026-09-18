@@ -6,18 +6,19 @@ from ..utilidades.validaciones import validar_telefono_unico
 
 from ..utilidades.base_datos import obtener_bd
 from ..utilidades.seguridad import (
-    verificar_password, 
-    obtener_hash_password, 
+    verificar_password,
+    obtener_hash_password,
     crear_access_token,
     obtener_usuario_actual
 )
 from ..utilidades.configuracion import configuracion
 from ..modelos.usuario import Usuario
+from ..modelos.rol import Rol
 from ..modelos.token_recuperacion import TokenRecuperacion
 from ..esquemas.usuario_schemas import (
-    UsuarioRegistro, 
-    UsuarioLogin, 
-    TokenRespuesta, 
+    UsuarioRegistro,
+    UsuarioLogin,
+    TokenRespuesta,
     UsuarioRespuesta,
     CambiarPassword,
     SolicitudRecuperacion,
@@ -28,7 +29,6 @@ from ..esquemas.usuario_schemas import (
 )
 from ..servicios.api_peru import servicio_api_peru
 from ..servicios.email_service import servicio_email
-from app.modelos import usuario
 
 router = APIRouter(prefix="/auth", tags=["Autenticación"])
 
@@ -38,33 +38,33 @@ async def registrar_usuario(
     bd: Session = Depends(obtener_bd)
 ):
     email_normalizado = datos_usuario.email.lower().strip()
-    
+
     usuario_existente = bd.query(Usuario).filter(
         Usuario.email == email_normalizado
     ).first()
-    
+
     if usuario_existente:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El email ya está registrado"
         )
-    
+
     nombres = datos_usuario.nombres
     apellido_paterno = datos_usuario.apellido_paterno
     apellido_materno = datos_usuario.apellido_materno
-    
+
     if datos_usuario.tipo_usuario == "peruano_mayor":
         if datos_usuario.dni:
             dni_existe = bd.query(Usuario).filter(
                 Usuario.dni == datos_usuario.dni
             ).first()
-            
+
             if dni_existe:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="El DNI ya está registrado"
                 )
-        
+
         if datos_usuario.dni:
             try:
                 datos_reniec = await servicio_api_peru.consultar_dni(datos_usuario.dni)
@@ -73,28 +73,38 @@ async def registrar_usuario(
                 apellido_materno = datos_reniec.apellido_materno
             except Exception as e:
                 pass
-    
+
     elif datos_usuario.tipo_usuario == "extranjero":
         if datos_usuario.pasaporte:
             pasaporte_existe = bd.query(Usuario).filter(
                 Usuario.pasaporte == datos_usuario.pasaporte
             ).first()
-            
+
             if pasaporte_existe:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="El pasaporte ya está registrado"
                 )
-    
+
     if datos_usuario.telefono:
         validar_telefono_unico(
-            bd, 
-            datos_usuario.telefono, 
+            bd,
+            datos_usuario.telefono,
             usuario_id=None,
             permitir_duplicados=False
         )
-    
+
     try:
+        rol_por_defecto = bd.query(Rol).filter(
+            Rol.codigo == "usuario"
+        ).first()
+
+        if not rol_por_defecto:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Rol por defecto 'usuario' no está configurado"
+            )
+
         nuevo_usuario = Usuario(
             tipo_usuario=datos_usuario.tipo_usuario,
             email=email_normalizado,
@@ -107,37 +117,40 @@ async def registrar_usuario(
             telefono=datos_usuario.telefono,
             direccion=datos_usuario.direccion,
             fecha_nacimiento=datos_usuario.fecha_nacimiento,
+            rol_id=rol_por_defecto.id,
             activo=True,
             verificado=True
         )
-        
+
         bd.add(nuevo_usuario)
         bd.commit()
         bd.refresh(nuevo_usuario)
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         bd.rollback()
-        
+
         error_str = str(e).lower()
         if "password" in error_str and ("72 bytes" in error_str or "too long" in error_str):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="La contraseña es demasiado larga. Debe tener máximo 72 caracteres."
             )
-        
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al crear usuario: {str(e)}"
         )
-    
+
     access_token_expires = timedelta(minutes=configuracion.access_token_expire_minutes)
     access_token = crear_access_token(
         data={"sub": nuevo_usuario.email},
         expires_delta=access_token_expires
     )
-    
+
     apellidos_completos = f"{nuevo_usuario.apellido_paterno} {nuevo_usuario.apellido_materno}".strip()
-    
+
     usuario_respuesta = {
         "id": nuevo_usuario.id,
         "tipo_usuario": nuevo_usuario.tipo_usuario,
@@ -151,14 +164,16 @@ async def registrar_usuario(
         "telefono": nuevo_usuario.telefono,
         "fecha_nacimiento": nuevo_usuario.fecha_nacimiento.isoformat() if nuevo_usuario.fecha_nacimiento else None,
         "direccion": nuevo_usuario.direccion,
-        "rol": nuevo_usuario.rol.value,
+        "rol": nuevo_usuario.rol,
+        "permisos": nuevo_usuario.permisos,
         "activo": nuevo_usuario.activo,
+        "es_admin": nuevo_usuario.es_admin,
         "verificado": nuevo_usuario.verificado,
         "fecha_registro": nuevo_usuario.fecha_creacion.isoformat() if nuevo_usuario.fecha_creacion else None,
         "fecha_creacion": nuevo_usuario.fecha_creacion,
         "nombre_completo": nuevo_usuario.nombre_completo
     }
-    
+
     return TokenRespuesta(
         access_token=access_token,
         token_type="bearer",
@@ -172,58 +187,60 @@ async def login_usuario(
     bd: Session = Depends(obtener_bd)
 ):
     email_normalizado = credenciales.email.lower().strip()
-    
-    usuario = bd.query(Usuario).filter(
+
+    usuario_db = bd.query(Usuario).filter(
         Usuario.email == email_normalizado
     ).first()
-    
-    if not usuario:
+
+    if not usuario_db:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Correo o contraseña incorrectos"
         )
-    
-    if not verificar_password(credenciales.password, usuario.password_hash):
+
+    if not verificar_password(credenciales.password, usuario_db.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Correo o contraseña incorrectos"
         )
-    
-    if not usuario.activo:
+
+    if not usuario_db.activo:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Usuario desactivado"
         )
-    
+
     access_token_expires = timedelta(minutes=configuracion.access_token_expire_minutes)
     access_token = crear_access_token(
-        data={"sub": usuario.email},
+        data={"sub": usuario_db.email},
         expires_delta=access_token_expires
     )
-    
-    apellidos_completos = f"{usuario.apellido_paterno} {usuario.apellido_materno}".strip()
-    
+
+    apellidos_completos = f"{usuario_db.apellido_paterno} {usuario_db.apellido_materno}".strip()
+
     usuario_respuesta = {
-        "id": usuario.id,
-        "tipo_usuario": usuario.tipo_usuario,
-        "email": usuario.email,
-        "dni": usuario.dni,
-        "pasaporte": usuario.pasaporte,
-        "nombres": usuario.nombres,
-        "apellido_paterno": usuario.apellido_paterno,
-        "apellido_materno": usuario.apellido_materno,
+        "id": usuario_db.id,
+        "tipo_usuario": usuario_db.tipo_usuario,
+        "email": usuario_db.email,
+        "dni": usuario_db.dni,
+        "pasaporte": usuario_db.pasaporte,
+        "nombres": usuario_db.nombres,
+        "apellido_paterno": usuario_db.apellido_paterno,
+        "apellido_materno": usuario_db.apellido_materno,
         "apellidos": apellidos_completos,
-        "telefono": usuario.telefono,
-        "fecha_nacimiento": usuario.fecha_nacimiento.isoformat() if usuario.fecha_nacimiento else None,
-        "direccion": usuario.direccion,
-        "rol": usuario.rol.value,
-        "activo": usuario.activo,
-        "verificado": usuario.verificado,
-        "fecha_registro": usuario.fecha_creacion.isoformat() if usuario.fecha_creacion else None,
-        "fecha_creacion": usuario.fecha_creacion,
-        "nombre_completo": usuario.nombre_completo
+        "telefono": usuario_db.telefono,
+        "fecha_nacimiento": usuario_db.fecha_nacimiento.isoformat() if usuario_db.fecha_nacimiento else None,
+        "direccion": usuario_db.direccion,
+        "rol": usuario_db.rol,
+        "permisos": usuario_db.permisos,
+        "activo": usuario_db.activo,
+        "es_admin": usuario_db.es_admin,
+        "verificado": usuario_db.verificado,
+        "fecha_registro": usuario_db.fecha_creacion.isoformat() if usuario_db.fecha_creacion else None,
+        "fecha_creacion": usuario_db.fecha_creacion,
+        "nombre_completo": usuario_db.nombre_completo
     }
-    
+
     return TokenRespuesta(
         access_token=access_token,
         token_type="bearer",
@@ -252,17 +269,17 @@ async def cambiar_password(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="La contraseña actual es incorrecta"
         )
-    
+
     if verificar_password(datos.password_nueva, usuario_actual.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="La nueva contraseña debe ser diferente a la contraseña actual"
         )
-    
+
     try:
         usuario_actual.password_hash = obtener_hash_password(datos.password_nueva)
         bd.commit()
-        
+
         return {
             "mensaje": "Contraseña actualizada exitosamente",
             "usuario": usuario_actual.nombre_completo
@@ -282,47 +299,47 @@ async def solicitar_recuperacion_password(
     bd: Session = Depends(obtener_bd)
 ):
     email_normalizado = datos.email.lower().strip()
-    
-    usuario = bd.query(Usuario).filter(
+
+    usuario_db = bd.query(Usuario).filter(
         Usuario.email == email_normalizado
     ).first()
-    
-    if not usuario:
+
+    if not usuario_db:
         return RespuestaRecuperacion(
             mensaje="Si el email existe, recibirás un enlace de recuperación en unos minutos",
             email=datos.email
         )
-    
-    if not usuario.activo:
+
+    if not usuario_db.activo:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Usuario desactivado"
         )
-    
+
     tokens_antiguos = bd.query(TokenRecuperacion).filter(
-        TokenRecuperacion.usuario_email == usuario.email,
+        TokenRecuperacion.usuario_email == usuario_db.email,
         TokenRecuperacion.usado == False
     ).all()
-    
+
     for token in tokens_antiguos:
         token.usado = True
-    
+
     nuevo_token = TokenRecuperacion.crear_token(
-        usuario_email=usuario.email,
+        usuario_email=usuario_db.email,
         expire_minutes=configuracion.reset_token_expire_minutes
     )
-    
+
     bd.add(nuevo_token)
     bd.commit()
     bd.refresh(nuevo_token)
-    
+
     background_tasks.add_task(
         servicio_email.enviar_recuperacion_password,
-        usuario.email,
-        usuario.nombre_completo,
+        usuario_db.email,
+        usuario_db.nombre_completo,
         nuevo_token.token
     )
-    
+
     return RespuestaRecuperacion(
         mensaje="Si el email existe, recibirás un enlace de recuperación en unos minutos",
         email=datos.email
@@ -340,55 +357,55 @@ async def confirmar_recuperacion_password(
             TokenRecuperacion.token == datos.token,
             TokenRecuperacion.usado == False
         ).first()
-        
+
         if not token_recuperacion:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Token inválido o ya usado"
             )
-        
+
         if token_recuperacion.esta_expirado:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="El token ha expirado. Solicita uno nuevo"
             )
-        
-        usuario = bd.query(Usuario).filter(
+
+        usuario_db = bd.query(Usuario).filter(
             Usuario.email == token_recuperacion.usuario_email
         ).first()
-        
-        if not usuario:
+
+        if not usuario_db:
             token_recuperacion.usado = True
             bd.commit()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Usuario no encontrado"
             )
-        
-        es_misma_contraseña = verificar_password(datos.password_nueva, usuario.password_hash)
-        
+
+        es_misma_contraseña = verificar_password(datos.password_nueva, usuario_db.password_hash)
+
         if es_misma_contraseña:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="La nueva contraseña debe ser diferente a la contraseña anterior"
             )
-        
-        usuario.password_hash = obtener_hash_password(datos.password_nueva)
+
+        usuario_db.password_hash = obtener_hash_password(datos.password_nueva)
         token_recuperacion.usado = True
-        
+
         bd.commit()
-        
+
         background_tasks.add_task(
             servicio_email.enviar_notificacion_cambio_password,
-            usuario.email,
-            usuario.nombre_completo
+            usuario_db.email,
+            usuario_db.nombre_completo
         )
-        
+
         return RespuestaRecuperacion(
             mensaje="Contraseña actualizada exitosamente. Ya puedes iniciar sesión",
-            email=usuario.email
+            email=usuario_db.email
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -404,22 +421,22 @@ async def verificar_email_existe(
     bd: Session = Depends(obtener_bd)
 ):
     email_normalizado = datos.email.lower().strip()
-    
-    usuario = bd.query(Usuario).filter(
+
+    usuario_db = bd.query(Usuario).filter(
         Usuario.email == email_normalizado
     ).first()
-    
-    if not usuario:
+
+    if not usuario_db:
         return VerificarEmailResponse(
             existe=False,
             activo=None,
             mensaje="Email no encontrado"
         )
-    
+
     return VerificarEmailResponse(
         existe=True,
-        activo=usuario.activo,
-        mensaje="Email encontrado y usuario activo" if usuario.activo else "Usuario desactivado"
+        activo=usuario_db.activo,
+        mensaje="Email encontrado y usuario activo" if usuario_db.activo else "Usuario desactivado"
     )
 
 
@@ -432,31 +449,31 @@ async def verificar_token_recuperacion(
         TokenRecuperacion.token == token,
         TokenRecuperacion.usado == False
     ).first()
-    
+
     if not token_recuperacion:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Token inválido o ya usado"
         )
-    
+
     if token_recuperacion.esta_expirado:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="El token ha expirado. Solicita uno nuevo"
         )
-    
-    usuario = bd.query(Usuario).filter(
+
+    usuario_db = bd.query(Usuario).filter(
         Usuario.email == token_recuperacion.usuario_email
     ).first()
-    
-    if not usuario:
+
+    if not usuario_db:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Usuario no encontrado"
         )
-    
+
     return {
         "valido": True,
-        "email": usuario.email,
+        "email": usuario_db.email,
         "mensaje": "Token válido"
     }

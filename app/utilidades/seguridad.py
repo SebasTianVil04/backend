@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .auditoria import marcar_usuario_actual
 from .base_datos import obtener_bd
 from .configuracion import configuracion
-from ..modelos.usuario import Usuario, RolUsuario
+from ..modelos.usuario import Usuario
 
 logger = logging.getLogger("signafree.seguridad")
 
@@ -120,12 +120,14 @@ def obtener_usuario_actual(
     return _obtener_usuario_por_email(email, bd)
 
 
-def requiere_roles(*roles_permitidos: RolUsuario):
+def requiere_roles(*codigos_rol: str):
     def dependencia(usuario_actual: Usuario = Depends(obtener_usuario_actual)) -> Usuario:
-        if not usuario_actual.tiene_rol(*roles_permitidos):
+        if not usuario_actual.tiene_rol(*codigos_rol):
             logger.warning(
                 "Acceso denegado: usuario_id=%s rol=%s roles_requeridos=%s",
-                usuario_actual.id, usuario_actual.rol, [r.value for r in roles_permitidos]
+                usuario_actual.id,
+                usuario_actual.rol.codigo if usuario_actual.rol else None,
+                codigos_rol,
             )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -135,5 +137,22 @@ def requiere_roles(*roles_permitidos: RolUsuario):
     return dependencia
 
 
-verificar_admin = requiere_roles(RolUsuario.ADMIN)
+def requiere_permiso(*codigos_permiso: str):
+    def dependencia(usuario_actual: Usuario = Depends(obtener_usuario_actual)) -> Usuario:
+        if not any(usuario_actual.tiene_permiso(codigo) for codigo in codigos_permiso):
+            logger.warning(
+                "Acceso denegado por permiso: usuario_id=%s rol=%s permisos_requeridos=%s",
+                usuario_actual.id,
+                usuario_actual.rol.codigo if usuario_actual.rol else None,
+                codigos_permiso,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos suficientes",
+            )
+        return usuario_actual
+    return dependencia
+
+
+verificar_admin = requiere_roles("admin")
 verificar_token_admin = verificar_admin

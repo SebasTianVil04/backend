@@ -3,129 +3,177 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 import os
+import threading
 from pathlib import Path
-import sys
 
 from app.utilidades.configuracion import configuracion
 from app.utilidades.base_datos import crear_tablas
 
-print("Importando routers...")
+
+def log(mensaje: str):
+    print(mensaje, flush=True)
+
+
+routers_disponibles = {}
+
+log("Importando routers...")
+
 try:
     from app.rutas import autenticacion
-    print("  autenticacion OK")
+    log("  autenticacion OK")
+    routers_disponibles["autenticacion"] = autenticacion
 except Exception as e:
-    print(f"  Error autenticacion: {e}")
-    sys.exit(1)
+    log(f"  Error autenticacion: {e}")
 
 try:
     from app.rutas import rutas_captura
-    print("  rutas_captura OK")
+    log("  rutas_captura OK")
+    routers_disponibles["rutas_captura"] = rutas_captura
 except Exception as e:
-    print(f"  Error rutas_captura: {e}")
+    log(f"  Error rutas_captura: {e}")
 
 try:
     from app.rutas import usuarios
-    print("  usuarios OK")
+    log("  usuarios OK")
+    routers_disponibles["usuarios"] = usuarios
 except Exception as e:
-    print(f"  Error usuarios: {e}")
+    log(f"  Error usuarios: {e}")
 
 try:
     from app.rutas import categorias
-    print("  categorias OK")
+    log("  categorias OK")
+    routers_disponibles["categorias"] = categorias
 except Exception as e:
-    print(f"  Error categorias: {e}")
+    log(f"  Error categorias: {e}")
 
 try:
     from app.rutas import lecciones
-    print("  lecciones OK")
+    log("  lecciones OK")
+    routers_disponibles["lecciones"] = lecciones
 except Exception as e:
-    print(f"  Error lecciones: {e}")
+    log(f"  Error lecciones: {e}")
 
 try:
     from app.rutas import clases
-    print("  clases OK")
+    log("  clases OK")
+    routers_disponibles["clases"] = clases
 except Exception as e:
-    print(f"  Error clases: {e}")
+    log(f"  Error clases: {e}")
 
 try:
     from app.rutas import practicas
-    print("  practicas OK")
+    log("  practicas OK")
+    routers_disponibles["practicas"] = practicas
 except Exception as e:
-    print(f"  Error practicas: {e}")
+    log(f"  Error practicas: {e}")
 
 try:
     from app.rutas import progreso
-    print("  progreso OK")
+    log("  progreso OK")
+    routers_disponibles["progreso"] = progreso
 except Exception as e:
-    print(f"  Error progreso: {e}")
+    log(f"  Error progreso: {e}")
 
 try:
     from app.rutas import examenes
-    print("  examenes OK")
+    log("  examenes OK")
+    routers_disponibles["examenes"] = examenes
 except Exception as e:
-    print(f"  Error examenes: {e}")
+    log(f"  Error examenes: {e}")
 
 try:
     from app.rutas import dataset
-    print("  dataset OK")
+    log("  dataset OK")
+    routers_disponibles["dataset"] = dataset
 except Exception as e:
-    print(f"  Error dataset: {e}")
+    log(f"  Error dataset: {e}")
 
 try:
     from app.rutas import traductor
-    print("  traductor OK")
+    log("  traductor OK")
+    routers_disponibles["traductor"] = traductor
 except Exception as e:
-    print(f"  Error traductor: {e}")
+    log(f"  Error traductor: {e}")
 
 try:
     from app.rutas import admin
-    print("  admin OK")
+    log("  admin OK")
+    routers_disponibles["admin"] = admin
 except Exception as e:
-    print(f"  Error admin: {e}")
+    log(f"  Error admin: {e}")
 
 try:
     from app.rutas import examenes_admin
-    print("  examenes_admin OK")
+    log("  examenes_admin OK")
+    routers_disponibles["examenes_admin"] = examenes_admin
 except Exception as e:
-    print(f"  Error examenes_admin: {e}")
+    log(f"  Error examenes_admin: {e}")
 
 try:
     from app.rutas import estudio
-    print("  estudio OK")
+    log("  estudio OK")
+    routers_disponibles["estudio"] = estudio
 except Exception as e:
-    print(f"  Error estudio: {e}")
+    log(f"  Error estudio: {e}")
 
 try:
     from app.rutas import estadisticas_rutas
-    print("  estadisticas_rutas OK")
+    log("  estadisticas_rutas OK")
+    routers_disponibles["estadisticas_rutas"] = estadisticas_rutas
 except Exception as e:
-    print(f"  Error estadisticas_rutas: {e}")
+    log(f"  Error estadisticas_rutas: {e}")
 
 try:
     from app.rutas import reconocimiento_video
-    print("  reconocimiento_video OK")
+    log("  reconocimiento_video OK")
+    routers_disponibles["reconocimiento_video"] = reconocimiento_video
 except Exception as e:
-    print(f"  Error reconocimiento_video: {e}")
+    log(f"  Error reconocimiento_video: {e}")
 
 try:
     from app.rutas import tipos_categoria
-    print("  tipos_categoria OK")
+    log("  tipos_categoria OK")
+    routers_disponibles["tipos_categoria"] = tipos_categoria
 except Exception as e:
-    print(f"  Error tipos_categoria: {e}")
+    log(f"  Error tipos_categoria: {e}")
 
 try:
     from app.rutas import categorias_dataset
-    print("  categorias_dataset OK")
+    log("  categorias_dataset OK")
+    routers_disponibles["categorias_dataset"] = categorias_dataset
 except Exception as e:
-    print(f"  Error categorias_dataset: {e}")
+    log(f"  Error categorias_dataset: {e}")
 
 try:
     from app.rutas import senas_categoria
-    print("  senas_categoria OK")
+    log("  senas_categoria OK")
+    routers_disponibles["senas_categoria"] = senas_categoria
 except Exception as e:
-    print(f"  Error senas_categoria: {e}")
+    log(f"  Error senas_categoria: {e}")
 
-print("Todos los routers importados")
+try:
+    from app.rutas import roles
+    log("  roles OK")
+    routers_disponibles["roles"] = roles
+except Exception as e:
+    log(f"  Error roles: {e}")
+
+try:
+    from app.rutas import menu
+    log("  menu OK")
+    routers_disponibles["menu"] = menu
+except Exception as e:
+    log(f"  Error menu: {e}")
+
+try:
+    from app.rutas import menu_admin
+    log("  menu_admin OK")
+    routers_disponibles["menu_admin"] = menu_admin
+except Exception as e:
+    log(f"  Error menu_admin: {e}")
+
+
+log("Todos los routers importados")
 
 app = FastAPI(
     title="SignaFree API",
@@ -136,7 +184,7 @@ app = FastAPI(
     redirect_slashes=False
 )
 
-print("Configurando CORS...")
+log("Configurando CORS...")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=configuracion.allowed_origins,
@@ -154,7 +202,8 @@ app.add_middleware(
     expose_headers=["*"],
     max_age=3600,
 )
-print("CORS configurado")
+log("CORS configurado")
+
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -162,13 +211,14 @@ async def log_requests(request: Request, call_next):
     method = request.method
     path = request.url.path
 
-    print(f"IN {method} {path} | Origin: {origin}")
+    log(f"IN {method} {path} | Origin: {origin}")
 
     response = await call_next(request)
 
-    print(f"OUT {method} {path} | Status: {response.status_code}")
+    log(f"OUT {method} {path} | Status: {response.status_code}")
 
     return response
+
 
 def crear_directorios():
     directorios = [
@@ -185,116 +235,253 @@ def crear_directorios():
 
     for directorio in directorios:
         os.makedirs(directorio, exist_ok=True)
-        print(f"Directorio creado/verificado: {directorio}")
+        log(f"Directorio creado/verificado: {directorio}")
+
+
+def crear_tablas_con_timeout(timeout_segundos: int = 15):
+    resultado = {"error": None, "completado": False}
+
+    def objetivo():
+        try:
+            crear_tablas()
+            resultado["completado"] = True
+        except Exception as e:
+            resultado["error"] = e
+
+    hilo = threading.Thread(target=objetivo, daemon=True)
+    hilo.start()
+    hilo.join(timeout=timeout_segundos)
+
+    if hilo.is_alive():
+        log(f"ADVERTENCIA: crear_tablas() no respondió en {timeout_segundos}s.")
+        log("Probable causa: la base de datos no está accesible (host/puerto/credenciales) o la conexión está colgada.")
+        return False
+
+    if resultado["error"] is not None:
+        log(f"Error en base de datos: {resultado['error']}")
+        return False
+
+    return resultado["completado"]
+
+
+import logging
+logging.basicConfig(level=logging.INFO)
+
+
+def sembrar_datos_iniciales():
+    """
+    Orden OBLIGATORIO: permisos -> roles -> admin -> menú.
+    - seed_permisos crea el catálogo de permisos en BD.
+    - seed_roles crea los roles y resuelve sus permisos por código
+      (necesita que los permisos ya existan).
+    - seed_admin crea/asegura el administrador principal, leyendo
+      credenciales de variables de entorno (ADMIN_EMAIL, ADMIN_PASSWORD,
+      etc.). Necesita que el rol "admin" ya exista. Si faltan las
+      variables de entorno, se omite con un warning sin romper el arranque.
+    - seed_menu crea los ítems de menú (referencian permisos por código).
+    """
+    try:
+        from app.utilidades.base_datos import SessionLocal
+    except Exception as e:
+        log(f"No se pudo importar SessionLocal: {e}")
+        return
+
+    try:
+        from app.semillas.seed_permisos import seed_permisos
+    except Exception as e:
+        log(f"Seed permisos no disponible: {e}")
+        seed_permisos = None
+
+    try:
+        from app.semillas.seed_roles import seed_roles
+    except Exception as e:
+        log(f"Seed roles no disponible: {e}")
+        seed_roles = None
+
+    try:
+        from app.semillas.seed_admin import seed_admin
+    except Exception as e:
+        log(f"Seed admin no disponible: {e}")
+        seed_admin = None
+
+    try:
+        from app.semillas.seed_menu import seed_menu
+    except Exception as e:
+        log(f"Seed menú no disponible: {e}")
+        seed_menu = None
+
+    db = SessionLocal()
+    try:
+        if seed_permisos:
+            seed_permisos(db)
+            log("Permisos sembrados")
+
+        if seed_roles:
+            seed_roles(db)
+            log("Roles sembrados")
+
+        if seed_admin:
+            seed_admin(db)
+            log("Admin principal verificado/sembrado")
+
+        if seed_menu:
+            seed_menu(db)
+            log("Menú sembrado")
+    except Exception as e:
+        log(f"Error sembrando datos iniciales: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
 
 @app.on_event("startup")
 async def startup_event():
-    print("=" * 50)
-    print("INICIANDO SIGNAFREE API v2.0.0")
-    print("=" * 50)
+    log("=" * 50)
+    log("INICIANDO SIGNAFREE API v2.0.0")
+    log("=" * 50)
 
     try:
         crear_directorios()
-        print("Directorios verificados")
+        log("Directorios verificados")
     except Exception as e:
-        print(f"Error creando directorios: {e}")
+        log(f"Error creando directorios: {e}")
 
-    try:
-        crear_tablas()
-        print("Base de datos verificada")
-    except Exception as e:
-        print(f"Error en base de datos: {e}")
+    if crear_tablas_con_timeout():
+        log("Base de datos verificada")
+        sembrar_datos_iniciales()
+    else:
+        log("Continuando sin confirmar la base de datos (revisa la conexión).")
 
-    print("SIGNAFREE API LISTA")
-    print(f"Servidor: http://{configuracion.host}:{configuracion.port}")
-    print(f"Documentacion: http://{configuracion.host}:{configuracion.port}/docs")
-    print("=" * 50)
+    log("SIGNAFREE API LISTA")
+    log(f"Servidor: http://{configuracion.host}:{configuracion.port}")
+    log(f"Documentacion: http://{configuracion.host}:{configuracion.port}/docs")
+    log("=" * 50)
+
 
 try:
     upload_path = Path(configuracion.upload_dir)
     if upload_path.exists():
         app.mount("/uploads", StaticFiles(directory=str(upload_path)), name="uploads")
-        print(f"Archivos estaticos montados en /uploads desde: {upload_path}")
+        log(f"Archivos estaticos montados en /uploads desde: {upload_path}")
     else:
-        print(f"Directorio de uploads no existe: {upload_path}")
+        log(f"Directorio de uploads no existe: {upload_path}")
 
     archivos_subidos_path = Path("archivos_subidos")
     if not archivos_subidos_path.exists():
         archivos_subidos_path.mkdir(exist_ok=True)
-        print(f"Directorio archivos_subidos creado: {archivos_subidos_path}")
+        log(f"Directorio archivos_subidos creado: {archivos_subidos_path}")
 
     app.mount("/archivos_subidos", StaticFiles(directory=str(archivos_subidos_path)), name="archivos_subidos")
-    print(f"Archivos estaticos montados en /archivos_subidos desde: {archivos_subidos_path}")
+    log(f"Archivos estaticos montados en /archivos_subidos desde: {archivos_subidos_path}")
 
     senas_referencia_path = archivos_subidos_path / "senas_referencia"
     senas_referencia_path.mkdir(parents=True, exist_ok=True)
     app.mount("/archivos/senas_referencia", StaticFiles(directory=str(senas_referencia_path)), name="senas_referencia")
-    print(f"Archivos estaticos montados en /archivos/senas_referencia desde: {senas_referencia_path}")
+    log(f"Archivos estaticos montados en /archivos/senas_referencia desde: {senas_referencia_path}")
 
 except Exception as e:
-    print(f"Error montando archivos estaticos: {e}")
+    log(f"Error montando archivos estaticos: {e}")
     import traceback
     traceback.print_exc()
 
-print("Registrando rutas...")
-app.include_router(autenticacion.router, prefix="/api/v1")
-print("  Autenticacion")
+log("Registrando rutas...")
 
-app.include_router(usuarios.router, prefix="/api/v1")
-print("  Usuarios")
+if "autenticacion" in routers_disponibles:
+    app.include_router(routers_disponibles["autenticacion"].router, prefix="/api/v1")
+    log("  Autenticacion")
 
-app.include_router(categorias.router, prefix="/api/v1")
-print("  Categorias")
+if "usuarios" in routers_disponibles:
+    app.include_router(routers_disponibles["usuarios"].router, prefix="/api/v1")
+    log("  Usuarios")
 
-app.include_router(lecciones.router, prefix="/api/v1")
-print("  Lecciones")
+if "categorias" in routers_disponibles:
+    app.include_router(routers_disponibles["categorias"].router, prefix="/api/v1")
+    log("  Categorias")
 
-app.include_router(clases.router, prefix="/api/v1")
-print("  Clases")
+if "lecciones" in routers_disponibles:
+    app.include_router(routers_disponibles["lecciones"].router, prefix="/api/v1")
+    log("  Lecciones")
 
-app.include_router(practicas.router, prefix="/api/v1")
-print("  Practicas")
+if "clases" in routers_disponibles:
+    app.include_router(routers_disponibles["clases"].router, prefix="/api/v1")
+    log("  Clases")
 
-app.include_router(progreso.router, prefix="/api/v1")
-print("  Progreso")
+if "practicas" in routers_disponibles:
+    app.include_router(routers_disponibles["practicas"].router, prefix="/api/v1")
+    log("  Practicas")
 
-app.include_router(examenes.router, prefix="/api/v1")
-print("  Examenes")
+if "progreso" in routers_disponibles:
+    app.include_router(routers_disponibles["progreso"].router, prefix="/api/v1")
+    log("  Progreso")
 
-app.include_router(dataset.router, prefix="/api/v1")
-print("  Dataset")
+if "examenes" in routers_disponibles:
+    app.include_router(routers_disponibles["examenes"].router, prefix="/api/v1")
+    log("  Examenes")
 
-app.include_router(reconocimiento_video.router, prefix="/api/v1")
-print("  Reconocimiento")
+if "dataset" in routers_disponibles:
+    app.include_router(routers_disponibles["dataset"].router, prefix="/api/v1")
+    log("  Dataset")
 
-app.include_router(traductor.router, prefix="/api/v1")
-print("  Traductor")
+if "reconocimiento_video" in routers_disponibles:
+    app.include_router(routers_disponibles["reconocimiento_video"].router, prefix="/api/v1")
+    log("  Reconocimiento")
 
-app.include_router(admin.router, prefix="/api/v1")
-print("  Admin")
+if "traductor" in routers_disponibles:
+    app.include_router(routers_disponibles["traductor"].router, prefix="/api/v1")
+    log("  Traductor")
 
-app.include_router(rutas_captura.router, prefix="/api/v1")
-print("  Captura")
+if "admin" in routers_disponibles:
+    app.include_router(routers_disponibles["admin"].router, prefix="/api/v1")
+    log("  Admin")
 
-app.include_router(examenes_admin.router, prefix="/api/v1/admin/examenes")
-print("  Examenes Admin")
+if "rutas_captura" in routers_disponibles:
+    app.include_router(routers_disponibles["rutas_captura"].router, prefix="/api/v1")
+    log("  Captura")
 
-app.include_router(estudio.router, prefix="/api/v1")
-print("  Estudio")
+if "examenes_admin" in routers_disponibles:
+    app.include_router(routers_disponibles["examenes_admin"].router, prefix="/api/v1/admin/examenes")
+    log("  Examenes Admin")
 
-app.include_router(estadisticas_rutas.router, prefix="/api/v1")
-print("  Estadisticas")
+if "estudio" in routers_disponibles:
+    app.include_router(routers_disponibles["estudio"].router, prefix="/api/v1")
+    log("  Estudio")
 
-app.include_router(tipos_categoria.router, prefix="/api/v1")
-print("  Tipos Categoria")
+if "estadisticas_rutas" in routers_disponibles:
+    app.include_router(routers_disponibles["estadisticas_rutas"].router, prefix="/api/v1")
+    log("  Estadisticas")
 
-app.include_router(categorias_dataset.router, prefix="/api/v1")
-print("  Categorias Dataset")
+if "tipos_categoria" in routers_disponibles:
+    app.include_router(routers_disponibles["tipos_categoria"].router, prefix="/api/v1")
+    log("  Tipos Categoria")
 
-app.include_router(senas_categoria.router, prefix="/api/v1")
-print("  Senas Categoria")
+if "categorias_dataset" in routers_disponibles:
+    app.include_router(routers_disponibles["categorias_dataset"].router, prefix="/api/v1")
+    log("  Categorias Dataset")
 
-print("Todas las rutas registradas")
+if "senas_categoria" in routers_disponibles:
+    app.include_router(routers_disponibles["senas_categoria"].router, prefix="/api/v1")
+    log("  Senas Categoria")
+
+if "roles" in routers_disponibles:
+    app.include_router(routers_disponibles["roles"].router)
+    log("  Roles")
+else:
+    log("  Roles (omitido por error de importación)")
+
+if "menu" in routers_disponibles:
+    app.include_router(routers_disponibles["menu"].router, prefix="/api/v1")
+    log("  Menu (usuario)")
+else:
+    log("  Menu (omitido por error de importación)")
+
+if "menu_admin" in routers_disponibles:
+    app.include_router(routers_disponibles["menu_admin"].router)
+    log("  Menu Admin")
+else:
+    log("  Menu Admin (omitido por error de importación)")
+
+log("Todas las rutas registradas")
+
 
 @app.get("/", tags=["General"])
 async def root():
@@ -306,6 +493,7 @@ async def root():
         "documentacion": "/docs",
         "salud": "/health"
     }
+
 
 @app.get("/health", tags=["General"])
 async def health_check():
@@ -319,12 +507,14 @@ async def health_check():
         }
     }
 
+
 @app.get("/api/v1/test-cors", tags=["General"])
 async def test_cors():
     return {
         "mensaje": "CORS funcionando correctamente",
         "timestamp": "2025-01-01T00:00:00Z"
     }
+
 
 @app.get("/api/v1/test-archivos", tags=["General"])
 async def test_archivos():
@@ -343,6 +533,7 @@ async def test_archivos():
         "url_ejemplo": "http://localhost:8000/archivos_subidos/videos_dataset/A_20251031_211516_683467.webm"
     }
 
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
@@ -354,13 +545,14 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         }
     )
 
+
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     import traceback
     error_traceback = traceback.format_exc()
 
-    print(f"Error no manejado: {str(exc)}")
-    print(error_traceback)
+    log(f"Error no manejado: {str(exc)}")
+    log(error_traceback)
 
     return JSONResponse(
         status_code=500,
@@ -372,12 +564,13 @@ async def general_exception_handler(request: Request, exc: Exception):
         }
     )
 
+
 if __name__ == "__main__":
     import uvicorn
 
-    print("=" * 50)
-    print("Iniciando servidor con Uvicorn...")
-    print("=" * 50)
+    log("=" * 50)
+    log("Iniciando servidor con Uvicorn...")
+    log("=" * 50)
 
     uvicorn.run(
         "app.main:app",

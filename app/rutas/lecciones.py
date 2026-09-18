@@ -8,7 +8,8 @@ from app.modelos.progreso import ProgresoClase
 from app.modelos.examen import ResultadoExamen
 
 from ..utilidades.base_datos import obtener_bd
-from ..utilidades.seguridad import verificar_admin, obtener_usuario_actual
+from ..utilidades.seguridad import obtener_usuario_actual
+from ..dependencias.permisos import requiere_permiso
 from ..modelos.leccion import Leccion
 from ..modelos.categoria import Categoria
 from ..modelos.usuario import Usuario
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/lecciones", tags=["Lecciones"])
 async def crear_leccion(
     leccion: LeccionCrear,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.lecciones.gestionar"))
 ):
     try:
         categoria_db = db.query(Categoria).filter(Categoria.id == leccion.categoria_id).first()
@@ -160,7 +161,7 @@ async def actualizar_leccion(
     leccion_id: int,
     datos: LeccionActualizar,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.lecciones.gestionar"))
 ):
     try:
         leccion = db.query(Leccion).filter(Leccion.id == leccion_id).first()
@@ -217,7 +218,7 @@ async def actualizar_leccion(
 async def eliminar_leccion(
     leccion_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.lecciones.gestionar"))
 ):
     try:
         leccion = db.query(Leccion).filter(Leccion.id == leccion_id).first()
@@ -245,7 +246,6 @@ async def obtener_examenes_leccion(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    """Obtener exámenes de una lección específica"""
     try:
         leccion = db.query(Leccion).filter(
             Leccion.id == leccion_id,

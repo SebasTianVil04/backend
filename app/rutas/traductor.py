@@ -21,10 +21,6 @@ from ..servicios.gestor_reconocimiento import (
 router = APIRouter(prefix="/traductor", tags=["Traductor"])
 logger = logging.getLogger(__name__)
 
-# Antes este endpoint exigía solo 3 frames con manos detectadas y por debajo
-# de eso caía en un fallback de clasificación por imágenes crudas. Ahora usa
-# el mismo umbral que el modo video (4) y, si no lo alcanza, responde que no
-# detectó nada en vez de adivinar.
 MIN_FRAMES_CON_MANOS = 4
 
 
@@ -49,7 +45,6 @@ async def traducir_senas_a_texto(
                 detail="Se requieren frames o imagen"
             )
 
-        # Procesar frames a imágenes (máximo 16 más recientes)
         frames = []
         if frames_base64:
             for frame_b64 in frames_base64[-16:]:
@@ -68,21 +63,12 @@ async def traducir_senas_a_texto(
                 datos={"confianza": 0.0, "sena_detectada": ""}
             )
 
-        # Extraer keypoints de cada frame
         keypoints_secuencia = []
         for frame in frames:
             kp = extraer_keypoints_frame(frame)
             if kp is not None:
                 keypoints_secuencia.append(kp)
 
-        # -----------------------------------------------------------------
-        # CAMBIO CLAVE (antes causaba falsos positivos):
-        # Ya NO hay fallback a un modelo de imágenes crudas cuando no se
-        # detectan manos suficientes. Ese fallback no sabía si había manos
-        # en la imagen o no, así que podía "inventar" una seña cuando no
-        # había nada frente a la cámara. Ahora se responde honestamente
-        # que no se detectó nada, igual que ya hacía el modo video.
-        # -----------------------------------------------------------------
         if len(keypoints_secuencia) < MIN_FRAMES_CON_MANOS:
             processing_time = time.time() - start_time
             return RespuestaAPI(
@@ -97,9 +83,6 @@ async def traducir_senas_a_texto(
                 }
             )
 
-        # Modelo compartido con el modo video: se carga una sola vez y ya
-        # viene precalentado (warm-up), así la captura manual deja de sufrir
-        # el arranque en frío que antes solo evitaba el modo continuo.
         reconocedor, modelo_id = obtener_reconocedor(bd, categoria_id)
         tipo_sena = determinar_tipo_sena(bd, sena_esperada, categoria_id, reconocedor)
 
@@ -168,7 +151,7 @@ async def obtener_modelos_activos(
 ):
     from ..modelos.entrenamiento import ModeloIA
     from ..modelos.categoria import Categoria
-    from ..servicios.gestor_reconocimiento import _cache  # solo lectura, para reportar estado
+    from ..servicios.gestor_reconocimiento import _cache
 
     try:
         modelos = bd.query(ModeloIA).filter(ModeloIA.activo == True).all()
@@ -217,17 +200,6 @@ async def probar_todos_modelos(
     bd: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    """
-    OJO: este endpoint ya estaba roto en el archivo original. Llamaba a
-    `predecir_con_multiples_modelos(bd, frames)`, una función que no está
-    definida ni importada en ningún lado de traductor.py, así que cualquier
-    llamada terminaba en NameError (error 500 sin mensaje claro).
-
-    No se reconstruye aquí porque no tenemos su implementación real. Si
-    existe en algún otro archivo de `servicios/`, impórtala arriba y
-    reemplaza este cuerpo por la lógica original. Si no existe, hay que
-    escribirla desde cero o eliminar el endpoint.
-    """
     raise HTTPException(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,
         detail="Endpoint pendiente: falta la función predecir_con_multiples_modelos"

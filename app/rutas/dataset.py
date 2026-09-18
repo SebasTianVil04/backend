@@ -1,7 +1,6 @@
 import os
 import json
 import tempfile
-import traceback
 import logging
 from pathlib import Path as PathLib
 from datetime import datetime, timezone
@@ -18,7 +17,7 @@ from app.servicios.servicio_entrenamiento import servicio_entrenamiento
 from app.servicios.dataset_service import dataset_service
 from app.servicios.drive_service import eliminar_archivo_de_drive
 from ..utilidades.base_datos import obtener_bd
-from ..utilidades.seguridad import verificar_admin, obtener_usuario_actual
+from ..dependencias.permisos import requiere_permiso
 from ..modelos.usuario import Usuario
 from ..modelos.dataset import CategoriaDataset, VideoDataset
 from ..modelos.categoria import Categoria
@@ -80,7 +79,7 @@ def _eliminar_archivo_video(video: VideoDataset):
 async def crear_categoria_dataset(
     categoria: CategoriaDatasetCrear,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.categorias.gestionar"))
 ):
     try:
         nombre_normalizado = categoria.nombre.strip().lower()
@@ -179,7 +178,7 @@ async def crear_categoria_dataset(
 @router.get("/categorias", response_model=RespuestaLista)
 async def listar_categorias_dataset(
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.ver"))
 ):
     try:
         categorias = db.query(CategoriaDataset).filter(
@@ -230,7 +229,7 @@ async def subir_video_dataset(
     categoria_id: int = Form(...),
     sena: str = Form(...),
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.videos.gestionar"))
 ):
     try:
         categoria = db.query(CategoriaDataset).filter(
@@ -267,7 +266,7 @@ async def subir_video_dataset(
 @router.get("/videos/pendientes", response_model=RespuestaLista)
 async def listar_videos_pendientes(
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin),
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.videos.gestionar")),
     categoria_id: Optional[int] = None
 ):
     try:
@@ -309,7 +308,7 @@ async def aprobar_video_dataset(
     video_id: int,
     datos: VideoDatasetAprobar,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.videos.gestionar"))
 ):
     try:
         video = db.query(VideoDataset).filter(VideoDataset.id == video_id).first()
@@ -357,7 +356,7 @@ async def rechazar_video_dataset(
     video_id: int,
     notas: Optional[str] = None,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.videos.gestionar"))
 ):
     try:
         video = db.query(VideoDataset).filter(VideoDataset.id == video_id).first()
@@ -401,7 +400,7 @@ async def rechazar_video_dataset(
 async def eliminar_video_dataset(
     video_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.videos.gestionar"))
 ):
     try:
         video = db.query(VideoDataset).filter(VideoDataset.id == video_id).first()
@@ -426,7 +425,7 @@ async def eliminar_video_dataset(
 @router.delete("/videos/eliminar-todos", response_model=RespuestaAPI)
 async def eliminar_todos_videos_pendientes(
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.videos.gestionar"))
 ):
     try:
         videos = db.query(VideoDataset).filter(VideoDataset.aprobado == False).all()
@@ -459,7 +458,7 @@ async def eliminar_todos_videos_pendientes(
 async def listar_videos_categoria(
     categoria_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.ver")),
     solo_aprobados: bool = True
 ):
     try:
@@ -503,7 +502,7 @@ async def listar_videos_categoria(
 @router.get("/videos/todos", response_model=RespuestaLista)
 async def listar_todos_los_videos(
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.ver")),
     categoria_id: Optional[int] = None,
     estado: Optional[str] = None
 ):
@@ -585,7 +584,7 @@ async def listar_todos_los_videos(
 async def aprobar_videos_masivamente(
     datos: AprobacionMasivaRequest,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.videos.gestionar"))
 ):
     try:
         if not datos.video_ids:
@@ -623,7 +622,7 @@ async def aprobar_videos_masivamente(
 @router.get("/estadisticas", response_model=RespuestaAPI)
 async def obtener_estadisticas_dataset(
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.ver"))
 ):
     try:
         estadisticas = dataset_service.obtener_estadisticas_dataset(db)
@@ -638,7 +637,7 @@ async def entrenar_modelo_endpoint(
     configuracion: ConfiguracionEntrenamiento,
     background_tasks: BackgroundTasks,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar"))
 ):
     try:
         categoria_ids = configuracion.categoria_ids
@@ -709,7 +708,7 @@ async def entrenar_modelo_endpoint(
 @router.get("/entrenamiento/progreso/{nombre_modelo}", response_model=RespuestaAPI)
 async def obtener_progreso_entrenamiento_endpoint(
     nombre_modelo: str,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar"))
 ):
     try:
         if not nombre_modelo or not nombre_modelo.strip():
@@ -798,7 +797,7 @@ async def cargar_modelo_preentrenado(
     descripcion: Optional[str] = Form(None),
     clases: Optional[str] = Form(None),
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar"))
 ):
     ruta_modelo = None
     try:
@@ -908,7 +907,7 @@ async def cargar_modelo_preentrenado(
 @router.post("/validar-modelo", response_model=RespuestaAPI)
 async def validar_modelo_preentrenado(
     archivo: UploadFile = File(...),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar"))
 ):
     temp_path = None
     try:
