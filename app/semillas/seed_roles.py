@@ -22,7 +22,6 @@ ROLES_SISTEMA: List[Dict[str, Union[str, List[str]]]] = [
             "clases.ver",
             "examenes.ver",
             "categorias.ver",
-            "traductor.usar",
             "reconocimiento.usar",
             "practicas.registrar",
             "practicas.ver_historial",
