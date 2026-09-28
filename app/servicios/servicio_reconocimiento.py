@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Tuple, Dict, Optional, List
@@ -8,18 +9,54 @@ from typing import Tuple, Dict, Optional, List
 import cv2
 import torch
 import numpy as np
-import mediapipe as mp
 import torch.nn.functional as F
 
 from app.modelos.modelo_adaptativo import ModeloAdaptativoSenas
 from app.servicios.config_tipo_senas import (
     detectar_tipo_sena,
-    obtener_config_sena,
-    calcular_factor_confusion_mejorado,
-    redimensionar_manteniendo_aspecto
+    calcular_factor_confusion_mejorado
+)
+from app.servicios.extractor_secuencias import (
+    ResultadoSecuencia,
+    crear_detector_manos,
+    landmarks_de_frame,
+    extraer_secuencia_landmarks,
+    secuencia_desde_frames,
+    secuencia_desde_keypoints,
+    normalizar_fila,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _variantes_tta(secuencia: np.ndarray) -> List[np.ndarray]:
+    variantes = [secuencia]
+
+    n = len(secuencia)
+    if n >= 4:
+        shift = max(1, n // 10)
+        variantes.append(np.roll(secuencia, shift=shift, axis=0))
+        variantes.append(np.roll(secuencia, shift=-shift, axis=0))
+
+    angulos = [-3.0, 3.0]
+    for grados in angulos:
+        a = np.deg2rad(grados)
+        c, s = float(np.cos(a)), float(np.sin(a))
+        v = secuencia.copy()
+        for i in range(len(v)):
+            frame = v[i]
+            for slot in range(2):
+                ini, fin = slot * 63, slot * 63 + 63
+                mano = frame[ini:fin].reshape(21, 3).copy()
+                x = mano[:, 0].copy()
+                y = mano[:, 1].copy()
+                mano[:, 0] = x * c - y * s
+                mano[:, 1] = x * s + y * c
+                frame[ini:fin] = mano.flatten()
+            v[i] = frame
+        variantes.append(v)
+
+    return variantes
 
 
 class ServicioReconocimiento:
@@ -32,17 +69,20 @@ class ServicioReconocimiento:
         self.frames_estatica = 8
         self.accuracy = 0.0
         self.arquitectura = ""
+        self.extractor_version = None
         self.tipos_senas = {}
         self.modelo_dir = Path('modelos_entrenados')
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.enable_amp = torch.cuda.is_available()
+        self.usar_tta = True
+        self.temperatura = 0.4
 
-        self.mp_hands = mp.solutions.hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+        self._hands_frame = crear_detector_manos(
+            estatico=True,
+            confianza_deteccion=0.4,
+            confianza_seguimiento=0.4,
         )
+        self._lock_hands = threading.Lock()
 
         if torch.cuda.is_available():
             torch.backends.cudnn.enabled = True
@@ -76,14 +116,18 @@ class ServicioReconocimiento:
             self.num_clases = checkpoint['num_clases']
             self.clases = checkpoint['clases']
             self.num_frames = checkpoint.get('num_frames', 20)
+            self.frames_estatica = checkpoint.get('frames_estaticos', 8)
             self.accuracy = checkpoint.get('accuracy', 0.0)
             self.arquitectura = checkpoint.get('arquitectura', 'ModeloAdaptativoSenas')
+            self.extractor_version = checkpoint.get('extractor_version')
             self.tipos_senas = checkpoint.get('tipos_senas', {})
 
             if not self.tipos_senas:
                 self.tipos_senas = {clase: detectar_tipo_sena(clase) for clase in self.clases}
 
-            self.model = ModeloAdaptativoSenas(self.num_clases, self.tipos_senas).to(self.device)
+            self.model = ModeloAdaptativoSenas(
+                self.num_clases, self.tipos_senas, self.frames_estatica
+            ).to(self.device)
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.model.eval()
 
@@ -91,10 +135,8 @@ class ServicioReconocimiento:
                 torch.cuda.empty_cache()
 
             logger.info(f"Modelo cargado: {ruta_modelo}")
-            logger.info(f"Arquitectura: {self.arquitectura}")
-            logger.info(f"Clases: {self.clases}")
-            logger.info(f"Accuracy: {self.accuracy:.4f}")
-            logger.info(f"Device: {self.device}")
+            logger.info(f"Clases: {self.clases} | Accuracy: {self.accuracy:.4f} | Device: {self.device}")
+            logger.info(f"Temperatura softmax: {self.temperatura} | TTA: {self.usar_tta}")
         except Exception as e:
             logger.error(f"Error cargando modelo: {e}")
             self.model = None
@@ -103,135 +145,55 @@ class ServicioReconocimiento:
 
     def _extraer_keypoints_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
         try:
-            resultado = self.mp_hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            if not resultado.multi_hand_landmarks:
+            with self._lock_hands:
+                fila, presencia = landmarks_de_frame(frame, self._hands_frame)
+            if not presencia.any():
                 return None
-
-            keypoints = []
-            for mano in resultado.multi_hand_landmarks[:2]:
-                for punto in mano.landmark:
-                    keypoints.extend([punto.x, punto.y, punto.z])
-
-            if len(keypoints) == 63:
-                keypoints.extend([0.0] * 63)
-            elif len(keypoints) != 126:
-                return None
-
-            return np.array(keypoints, dtype=np.float32)
+            return normalizar_fila(fila)
         except Exception as e:
             logger.warning(f"Error extrayendo keypoints: {e}")
             return None
 
-    def _indices_estaticos(self, total_frames: int, num_frames_extraer: int) -> np.ndarray:
-        centro = total_frames // 2
-        ventana = max(1, total_frames // 4)
-        inicio = max(0, centro - ventana)
-        fin = min(total_frames - 1, centro + ventana)
-        if fin <= inicio:
-            fin = min(total_frames - 1, inicio + 1)
-        indices = np.linspace(inicio, fin, num_frames_extraer, dtype=int)
-        return indices
+    def _tensor_desde_resultado(self, resultado: ResultadoSecuencia) -> torch.Tensor:
+        return torch.from_numpy(resultado.secuencia).float().unsqueeze(0).to(self.device)
 
-    def _completar_keypoints(self, keypoints_list: List[np.ndarray]) -> List[np.ndarray]:
-        while len(keypoints_list) < self.num_frames:
-            keypoints_list.append(keypoints_list[-1].copy() if keypoints_list else np.zeros(126, dtype=np.float32))
-        return keypoints_list[:self.num_frames]
+    def _resultado_desde_keypoints(self, keypoints_list: List[np.ndarray]) -> ResultadoSecuencia:
+        return secuencia_desde_keypoints(keypoints_list, self.num_frames)
 
-    def _preparar_keypoints_por_tipo(self, keypoints_list: List[np.ndarray], tipo_sena: str) -> torch.Tensor:
-        keypoints_list = list(keypoints_list)
-        total = len(keypoints_list)
+    def _resultado_desde_frames(self, frames_list: List[np.ndarray]) -> ResultadoSecuencia:
+        return secuencia_desde_frames(frames_list, self.num_frames)
 
-        if tipo_sena == 'ESTATICA':
-            max_frames = min(self.num_frames, self.frames_estatica)
-            if total > max_frames:
-                centro = total // 2
-                inicio = max(0, centro - max_frames // 2)
-                fin = min(total, inicio + max_frames)
-                keypoints_list = keypoints_list[inicio:fin]
-        else:
-            if total > self.num_frames:
-                indices = np.linspace(0, total - 1, self.num_frames, dtype=int)
-                keypoints_list = [keypoints_list[i] for i in indices]
+    def _analizar_video(self, ruta_video: str, sena_esperada: str = None) -> Tuple[ResultadoSecuencia, str]:
+        if not os.path.exists(ruta_video):
+            raise FileNotFoundError(f"Video no encontrado: {ruta_video}")
 
-        keypoints_list = self._completar_keypoints(keypoints_list)
-        return torch.from_numpy(np.stack(keypoints_list)).float().unsqueeze(0).to(self.device)
+        resultado = extraer_secuencia_landmarks(ruta_video, self.num_frames)
+        if resultado is None:
+            raise ValueError(f"No se puede abrir video: {ruta_video}")
+
+        tipo_sena = detectar_tipo_sena(sena_esperada) if sena_esperada else 'DINAMICA'
+        return resultado, tipo_sena
+
+    def _respuesta_sin_manos(self) -> Tuple[str, float, Dict]:
+        return "desconocido", 0.0, {"error": "No se detectaron manos", "alternativas": []}
 
     def procesar_video(self, ruta_video: str, sena_esperada: str = None) -> Tuple[torch.Tensor, str]:
-        cap = None
-        try:
-            if not os.path.exists(ruta_video):
-                raise FileNotFoundError(f"Video no encontrado: {ruta_video}")
-
-            cap = cv2.VideoCapture(ruta_video)
-            if not cap.isOpened():
-                raise ValueError(f"No se puede abrir video: {ruta_video}")
-
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames <= 0:
-                raise ValueError("Video sin frames válidos")
-
-            tipo_sena = detectar_tipo_sena(sena_esperada) if sena_esperada else 'DINAMICA'
-
-            if tipo_sena == 'ESTATICA':
-                frame_indices = self._indices_estaticos(total_frames, self.num_frames)
-            else:
-                frame_indices = np.linspace(0, total_frames - 1, self.num_frames, dtype=int)
-
-            keypoints_list = []
-            for frame_idx in frame_indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
-                ret, frame = cap.read()
-
-                if ret and frame is not None:
-                    frame = redimensionar_manteniendo_aspecto(frame, (224, 224))
-                    keypoints = self._extraer_keypoints_frame(frame)
-                    keypoints_list.append(keypoints if keypoints is not None else
-                                            (keypoints_list[-1].copy() if keypoints_list else np.zeros(126, dtype=np.float32)))
-                else:
-                    keypoints_list.append(keypoints_list[-1].copy() if keypoints_list else np.zeros(126, dtype=np.float32))
-
-            keypoints_list = self._completar_keypoints(keypoints_list)
-            tensor = torch.from_numpy(np.stack(keypoints_list)).float().unsqueeze(0).to(self.device)
-
-            return tensor, tipo_sena
-        except Exception as e:
-            logger.error(f"Error procesando video: {e}")
-            raise
-        finally:
-            if cap is not None:
-                cap.release()
+        resultado, tipo_sena = self._analizar_video(ruta_video, sena_esperada)
+        return self._tensor_desde_resultado(resultado), tipo_sena
 
     def procesar_frame_individual(self, frame: np.ndarray, sena_esperada: str = None) -> Tuple[torch.Tensor, str]:
         tipo_sena = detectar_tipo_sena(sena_esperada) if sena_esperada else 'DINAMICA'
 
-        frame = cv2.resize(frame, (224, 224), interpolation=cv2.INTER_LINEAR)
         keypoints = self._extraer_keypoints_frame(frame)
         if keypoints is None:
             keypoints = np.zeros(126, dtype=np.float32)
 
-        repeticiones = 5 if tipo_sena == 'ESTATICA' else self.num_frames
-        keypoints_list = self._completar_keypoints([keypoints.copy() for _ in range(repeticiones)])
-
-        tensor = torch.from_numpy(np.stack(keypoints_list)).float().unsqueeze(0).to(self.device)
+        secuencia = np.tile(keypoints, (self.num_frames, 1)).astype(np.float32)
+        tensor = torch.from_numpy(secuencia).float().unsqueeze(0).to(self.device)
         return tensor, tipo_sena
 
     def procesar_frames_secuencia(self, frames_list: List[np.ndarray], tipo_sena: str = 'DINAMICA') -> torch.Tensor:
-        keypoints_list = []
-
-        for frame in frames_list:
-            frame = redimensionar_manteniendo_aspecto(frame, (224, 224))
-            if len(frame.shape) == 2:
-                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
-            elif frame.shape[2] == 4:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
-            else:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-            keypoints = self._extraer_keypoints_frame(frame)
-            keypoints_list.append(keypoints if keypoints is not None else
-                                    (keypoints_list[-1].copy() if keypoints_list else np.zeros(126, dtype=np.float32)))
-
-        return self._preparar_keypoints_por_tipo(keypoints_list, tipo_sena)
+        return self._tensor_desde_resultado(self._resultado_desde_frames(frames_list))
 
     def _ejecutar_forward(self, tensor_keypoints: torch.Tensor, tipos_batch: List[str]):
         try:
@@ -242,7 +204,7 @@ class ServicioReconocimiento:
         except RuntimeError as e:
             if "cuDNN" not in str(e):
                 raise
-            logger.warning("Error cuDNN detectado, reintentando...")
+            logger.warning("Error cuDNN, reintentando...")
             torch.backends.cudnn.enabled = False
             try:
                 if self.enable_amp:
@@ -252,7 +214,23 @@ class ServicioReconocimiento:
             finally:
                 torch.backends.cudnn.enabled = True
 
-    def predecir(self, tensor_keypoints: torch.Tensor, tipo_sena: str = None, sena_esperada: str = None) -> Tuple[str, float, Dict]:
+    def _predecir_tensor(self, tensor: torch.Tensor, tipo_sena: str) -> np.ndarray:
+        tipos_batch = [tipo_sena] * tensor.shape[0]
+        with torch.no_grad(), torch.inference_mode():
+            outputs = self._ejecutar_forward(tensor, tipos_batch)
+
+            temperatura = max(0.05, min(1.0, float(self.temperatura)))
+            scaled = outputs / temperatura
+
+            probs = F.softmax(scaled, dim=1)
+
+            if torch.isnan(probs).any() or torch.isinf(probs).any():
+                probs = torch.ones_like(probs) / len(self.clases)
+
+            return probs.cpu().numpy()
+
+    def predecir(self, tensor_keypoints: torch.Tensor, tipo_sena: str = None,
+                 sena_esperada: str = None) -> Tuple[str, float, Dict]:
         if self.model is None or len(self.clases) == 0:
             return "desconocido", 0.0, {}
 
@@ -261,17 +239,20 @@ class ServicioReconocimiento:
                 tensor_keypoints = tensor_keypoints.to(self.device)
 
             tipo_sena = tipo_sena or 'DINAMICA'
-            tipos_batch = [tipo_sena] * tensor_keypoints.shape[0]
 
-            with torch.no_grad(), torch.inference_mode():
-                outputs = self._ejecutar_forward(tensor_keypoints, tipos_batch)
-                probabilities = F.softmax(outputs, dim=1)[0]
+            if self.usar_tta and tensor_keypoints.shape[0] == 1:
+                secuencia_np = tensor_keypoints[0].cpu().numpy()
+                variantes = _variantes_tta(secuencia_np)
 
-                if torch.isnan(probabilities).any() or torch.isinf(probabilities).any():
-                    logger.warning("NaN/Inf detectado en probabilidades")
-                    probabilities = torch.ones_like(probabilities) / len(self.clases)
+                acumulado = np.zeros(len(self.clases), dtype=np.float64)
+                for v in variantes:
+                    t = torch.from_numpy(v).float().unsqueeze(0).to(self.device)
+                    probs = self._predecir_tensor(t, tipo_sena)[0]
+                    acumulado += probs
 
-                probabilities_np = probabilities.cpu().numpy()
+                probabilities_np = (acumulado / len(variantes)).astype(np.float32)
+            else:
+                probabilities_np = self._predecir_tensor(tensor_keypoints, tipo_sena)[0]
 
             indice_predicho = int(np.argmax(probabilities_np))
             confianza = float(probabilities_np[indice_predicho])
@@ -287,7 +268,9 @@ class ServicioReconocimiento:
 
             factor_confusion = 1.0
             if sena_esperada and sena_detectada != sena_esperada:
-                factor_confusion = calcular_factor_confusion_mejorado(sena_esperada.upper(), sena_detectada.upper())
+                factor_confusion = calcular_factor_confusion_mejorado(
+                    sena_esperada.upper(), sena_detectada.upper()
+                )
 
             detalles = {
                 "tipo_sena": tipo_sena,
@@ -297,7 +280,9 @@ class ServicioReconocimiento:
                 "num_frames_usado": self.num_frames,
                 "factor_confusion": factor_confusion,
                 "es_confusion_conocida": factor_confusion > 1.0,
-                "modo": "keypoints_lstm"
+                "modo": "keypoints_lstm",
+                "tta_aplicado": self.usar_tta and tensor_keypoints.shape[0] == 1,
+                "temperatura": self.temperatura
             }
 
             return sena_detectada, confianza, detalles
@@ -305,23 +290,25 @@ class ServicioReconocimiento:
             logger.error(f"Error en predicción: {e}")
             return "desconocido", 0.0, {"error": str(e), "alternativas": []}
 
-    def predecir_adaptativo(self, keypoints_secuencia: List[np.ndarray], tipo_sena_inicial: str = None) -> Tuple[str, float, Dict]:
+    def predecir_adaptativo(self, keypoints_secuencia: List[np.ndarray],
+                             tipo_sena_inicial: str = None) -> Tuple[str, float, Dict]:
         tipo_sena_inicial = tipo_sena_inicial or 'DINAMICA'
 
-        tensor_inicial = self._preparar_keypoints_por_tipo(keypoints_secuencia, tipo_sena_inicial)
-        sena_detectada, confianza, detalles = self.predecir(tensor_inicial, tipo_sena_inicial, None)
+        resultado = self._resultado_desde_keypoints(keypoints_secuencia)
+        if resultado.frames_detectados == 0:
+            return self._respuesta_sin_manos()
+
+        tensor = self._tensor_desde_resultado(resultado)
+        sena_detectada, confianza, detalles = self.predecir(tensor, tipo_sena_inicial, None)
 
         tipo_real = self.tipos_senas.get(sena_detectada, tipo_sena_inicial)
 
         if tipo_real != tipo_sena_inicial and sena_detectada != "desconocido" and len(self.clases) > 0:
-            tensor_final = self._preparar_keypoints_por_tipo(keypoints_secuencia, tipo_real)
-            sena_detectada_2, confianza_2, detalles_2 = self.predecir(tensor_final, tipo_real, None)
-
+            sena_detectada_2, confianza_2, detalles_2 = self.predecir(tensor, tipo_real, None)
             if confianza_2 >= confianza:
                 detalles_2["tipo_inicial"] = tipo_sena_inicial
                 detalles_2["reevaluado"] = True
                 return sena_detectada_2, confianza_2, detalles_2
-
             detalles["tipo_inicial"] = tipo_sena_inicial
             detalles["reevaluado"] = True
             return sena_detectada, confianza, detalles
@@ -331,26 +318,44 @@ class ServicioReconocimiento:
         return sena_detectada, confianza, detalles
 
     def predecir_desde_video(self, ruta_video: str, sena_esperada: str = None) -> Tuple[str, float, Dict]:
-        tensor, tipo_sena = self.procesar_video(ruta_video, sena_esperada)
-        return self.predecir(tensor, tipo_sena, sena_esperada)
+        resultado, tipo_sena = self._analizar_video(ruta_video, sena_esperada)
+        if resultado.frames_detectados == 0:
+            return self._respuesta_sin_manos()
+        return self.predecir(self._tensor_desde_resultado(resultado), tipo_sena, sena_esperada)
 
     def predecir_desde_frame(self, frame: np.ndarray, sena_esperada: str = None) -> Tuple[str, float, Dict]:
-        tensor, tipo_sena = self.procesar_frame_individual(frame, sena_esperada)
+        keypoints = self._extraer_keypoints_frame(frame)
+        if keypoints is None:
+            return self._respuesta_sin_manos()
+
+        tipo_sena = detectar_tipo_sena(sena_esperada) if sena_esperada else 'DINAMICA'
+        secuencia = np.tile(keypoints, (self.num_frames, 1)).astype(np.float32)
+        tensor = torch.from_numpy(secuencia).float().unsqueeze(0).to(self.device)
         return self.predecir(tensor, tipo_sena, sena_esperada)
 
     def predecir_desde_secuencia(self, frames_list: List[np.ndarray], sena_esperada: str = None) -> Tuple[str, float, Dict]:
         tipo_sena = detectar_tipo_sena(sena_esperada) if sena_esperada else 'DINAMICA'
-        tensor = self.procesar_frames_secuencia(frames_list, tipo_sena)
-        return self.predecir(tensor, tipo_sena, sena_esperada)
+        resultado = self._resultado_desde_frames(frames_list)
+        if resultado.frames_detectados == 0:
+            return self._respuesta_sin_manos()
+        return self.predecir(self._tensor_desde_resultado(resultado), tipo_sena, sena_esperada)
 
-    def predecir_desde_keypoints(self, keypoints_list: List[np.ndarray], tipo_sena: str = None) -> Tuple[str, float, Dict]:
+    def predecir_desde_keypoints(self, keypoints_list: List[np.ndarray],
+                                  tipo_sena: str = None) -> Tuple[str, float, Dict]:
         try:
             tipo_sena = tipo_sena or 'DINAMICA'
-            tensor = self._preparar_keypoints_por_tipo(keypoints_list, tipo_sena)
-            return self.predecir(tensor, tipo_sena, None)
+            resultado = self._resultado_desde_keypoints(keypoints_list)
+            if resultado.frames_detectados == 0:
+                return self._respuesta_sin_manos()
+            return self.predecir(self._tensor_desde_resultado(resultado), tipo_sena, None)
         except Exception as e:
             logger.error(f"Error prediciendo desde keypoints: {e}")
             return "desconocido", 0.0, {"error": str(e), "alternativas": []}
+
+    def ajustar_temperatura(self, temperatura: float) -> float:
+        self.temperatura = max(0.05, min(1.0, float(temperatura)))
+        logger.info(f"Temperatura ajustada a {self.temperatura}")
+        return self.temperatura
 
     def obtener_estadisticas(self) -> Dict:
         return {
@@ -361,7 +366,10 @@ class ServicioReconocimiento:
             "num_frames": self.num_frames,
             "dispositivo": str(self.device),
             "arquitectura": self.arquitectura,
+            "extractor_version": self.extractor_version,
             "amp_enabled": self.enable_amp,
+            "tta_habilitado": self.usar_tta,
+            "temperatura": self.temperatura,
             "ultima_actualizacion": datetime.now().isoformat()
         }
 

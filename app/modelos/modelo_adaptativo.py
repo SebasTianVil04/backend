@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import logging
 
 logger = logging.getLogger(__name__)
@@ -20,12 +19,14 @@ class ModeloAdaptativoSenas(nn.Module):
         self.hidden_size = 256
         self.num_layers = 2
 
+        # num_layers=1: no se pasa dropout aquí porque PyTorch lo ignora
+        # silenciosamente en LSTM de una sola capa (y antes generaba un warning
+        # sin aportar ninguna regularización real).
         self.lstm_estatico = nn.LSTM(
             input_size=self.input_size_una_mano,
             hidden_size=128,
             num_layers=1,
             batch_first=True,
-            dropout=0.2
         )
 
         self.lstm_dinamico = nn.LSTM(
@@ -40,6 +41,18 @@ class ModeloAdaptativoSenas(nn.Module):
             nn.Linear(self.hidden_size, 128),
             nn.ReLU(inplace=True),
             nn.Linear(128, 1),
+            nn.Sigmoid()
+        )
+
+        # Atención temporal para señas estáticas: en vez de quedarnos solo con
+        # el último frame (que puede salir borroso/mal detectado), promediamos
+        # las frames centrales ponderadas por qué tan "confiable" es cada una.
+        # Esto ayuda a diferenciar formas de mano parecidas (B/D/P/1/4/R) porque
+        # ya no depende de un único frame para decidir.
+        self.temporal_attention_estatico = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 1),
             nn.Sigmoid()
         )
 
@@ -67,10 +80,7 @@ class ModeloAdaptativoSenas(nn.Module):
 
         self._inicializar_pesos()
 
-        logger.info(f"Modelo LSTM inicializado: {num_classes} clases")
-        logger.info(f"  - LSTM Estático: {self.input_size_una_mano} features (1 mano)")
-        logger.info(f"  - LSTM Dinámico: {self.input_size_dos_manos} features (2 manos)")
-        logger.info(f"  - Frames usados para señas estáticas: {self.frames_estaticos}")
+        logger.info(f"Modelo LSTM inicializado: {num_classes} clases (hidden=256, layers=2)")
 
     def _inicializar_pesos(self):
         for m in self.modules():
@@ -91,99 +101,85 @@ class ModeloAdaptativoSenas(nn.Module):
                         nn.init.constant_(param.data, 0)
 
     def _validar_input_size(self, x, esperado):
-        batch_size, num_frames, features = x.shape
+        _, _, features = x.shape
         if features != esperado:
             raise ValueError(f"Input incorrecto: {features} features, esperado {esperado}")
 
     def _seleccionar_mano_valida(self, x):
-        batch_size, num_frames, features = x.shape
+        """
+        Elige, para CADA frame, qué slot (0 o 1) trae la mano realmente detectada.
 
+        Antes esta decisión se tomaba una sola vez para todo el video (sumando
+        la energía de las 20 frames y comparando), lo que es frágil: si
+        MediaPipe etiqueta 'Right'/'Left' de forma inconsistente entre frames
+        del mismo video (común con cámara espejada), un par de frames mal
+        etiquetadas pueden inclinar la suma total hacia el slot equivocado y
+        el modelo termina descartando TODAS las frames del slot correcto.
+
+        Ahora la comparación es por frame: cada frame decide de forma
+        independiente cuál de los dos slots tiene señal real, así una
+        etiqueta inconsistente en algunos frames ya no arruina el resto de
+        la secuencia.
+        """
         mitad_a = x[:, :, :self.input_size_una_mano]
         mitad_b = x[:, :, self.input_size_una_mano:]
-
-        energia_a = mitad_a.abs().sum(dim=(1, 2))
-        energia_b = mitad_b.abs().sum(dim=(1, 2))
-
-        usar_b = (energia_b > energia_a).view(batch_size, 1, 1)
-        seleccionado = torch.where(usar_b, mitad_b, mitad_a)
-
-        return seleccionado
+        energia_a = mitad_a.abs().sum(dim=2, keepdim=True)  # (batch, frames, 1)
+        energia_b = mitad_b.abs().sum(dim=2, keepdim=True)
+        usar_b = energia_b > energia_a
+        return torch.where(usar_b, mitad_b, mitad_a)
 
     def forward_estatica(self, x):
-        batch_size, num_frames, features = x.shape
-
-        if not hasattr(self, 'lstm_estatico'):
-            raise AttributeError("Modelo no tiene atributo 'lstm_estatico'")
+        _, num_frames, features = x.shape
 
         if features == self.input_size_dos_manos:
             x = self._seleccionar_mano_valida(x)
         elif features != self.input_size_una_mano:
-            raise ValueError(f"Input incorrecto: {features} features, esperado {self.input_size_una_mano} o {self.input_size_dos_manos}")
+            raise ValueError(f"Input incorrecto: {features} features")
 
         self._validar_input_size(x, self.input_size_una_mano)
 
         frames_usar = min(self.frames_estaticos, num_frames)
         start_idx = (num_frames - frames_usar) // 2
-        x_input = x[:, start_idx:start_idx + frames_usar]
+        x_input = x[:, start_idx:start_idx + frames_usar].contiguous()
 
-        x_input = x_input.contiguous()
-
-        lstm_out, (hidden, cell) = self.lstm_estatico(x_input)
-
-        features_finales = lstm_out[:, -1, :]
-
+        lstm_out, _ = self.lstm_estatico(x_input)
+        pesos = self.temporal_attention_estatico(lstm_out)  # (batch, frames_usar, 1)
+        features_finales = torch.sum(lstm_out * pesos, dim=1) / (torch.sum(pesos, dim=1) + 1e-6)
         return self.classifier_estatico(features_finales)
 
     def forward_dinamica(self, x):
         batch_size, num_frames, features = x.shape
 
-        if not hasattr(self, 'lstm_dinamico'):
-            raise AttributeError("Modelo no tiene atributo 'lstm_dinamico'")
-
         if features == self.input_size_una_mano:
-            padding = torch.zeros(batch_size, num_frames, self.input_size_una_mano, device=x.device, dtype=x.dtype)
+            padding = torch.zeros(
+                batch_size, num_frames, self.input_size_una_mano,
+                device=x.device, dtype=x.dtype
+            )
             x = torch.cat([x, padding], dim=2)
         elif features != self.input_size_dos_manos:
-            raise ValueError(f"Input incorrecto: {features} features, esperado {self.input_size_una_mano} o {self.input_size_dos_manos}")
+            raise ValueError(f"Input incorrecto: {features} features")
 
         self._validar_input_size(x, self.input_size_dos_manos)
-
         x = x.contiguous()
 
-        lstm_out, (hidden, cell) = self.lstm_dinamico(x)
-
+        lstm_out, _ = self.lstm_dinamico(x)
         temporal_weights = self.temporal_attention(lstm_out)
         weighted_features = lstm_out * temporal_weights
-
         temporal_features = torch.mean(weighted_features, dim=1)
-
         return self.classifier_dinamico(temporal_features)
 
     def forward_batch_mixto(self, x, tipos_batch):
         batch_size = x.shape[0]
-
-        if len(x.shape) != 3:
-            raise ValueError(f"Forma de tensor incorrecta: {x.shape}, esperado (batch, frames, features)")
-
         output_final = torch.zeros(batch_size, self.num_classes, device=x.device, dtype=x.dtype)
 
-        tipos_unicos = set(tipos_batch)
-
-        for tipo in tipos_unicos:
+        for tipo in set(tipos_batch):
             indices = [i for i, t in enumerate(tipos_batch) if t == tipo]
             if not indices:
                 continue
-
             x_subset = x[indices].contiguous()
-
-            if tipo == 'ESTATICA':
-                salida = self.forward_estatica(x_subset)
-            else:
-                salida = self.forward_dinamica(x_subset)
-
+            salida = self.forward_estatica(x_subset) if tipo == 'ESTATICA' else self.forward_dinamica(x_subset)
             if salida.dtype != output_final.dtype:
                 salida = salida.to(output_final.dtype)
-
             output_final[indices] = salida
 
         return output_final
@@ -191,20 +187,15 @@ class ModeloAdaptativoSenas(nn.Module):
     def forward(self, x, tipos_batch=None):
         if tipos_batch is None:
             tipos_batch = ['DINAMICA'] * x.shape[0]
-
         return self.forward_batch_mixto(x, tipos_batch)
 
     def get_tipo_sena(self, nombre_sena):
-        if nombre_sena in self.tipos_senas_dict:
-            return self.tipos_senas_dict[nombre_sena]
-
-        return 'DINAMICA'
+        return self.tipos_senas_dict.get(nombre_sena, 'DINAMICA')
 
 
 def cargar_modelo_adaptativo(ruta_modelo, device):
     try:
-        checkpoint = torch.load(ruta_modelo, map_location=device)
-
+        checkpoint = torch.load(ruta_modelo, map_location=device, weights_only=False)
         clases = checkpoint.get('clases', [])
         tipos_senas = checkpoint.get('tipos_senas', {})
         num_clases = len(clases)
@@ -224,23 +215,13 @@ def cargar_modelo_adaptativo(ruta_modelo, device):
             'arquitectura': checkpoint.get('arquitectura', 'ModeloAdaptativoSenas'),
             'fecha_entrenamiento': checkpoint.get('fecha_entrenamiento', 'desconocido')
         }
-
-        logger.info(f"Modelo cargado: {num_clases} clases, accuracy={metadata['accuracy']:.4f}")
-
         return modelo, metadata
-
     except Exception as e:
         logger.error(f"Error cargando modelo: {e}")
         raise
 
 
 def contar_parametros(modelo):
-    total_params = sum(p.numel() for p in modelo.parameters())
-    trainable_params = sum(p.numel() for p in modelo.parameters() if p.requires_grad)
-
-    return {
-        'total': total_params,
-        'entrenables': trainable_params,
-        'congelados': total_params - trainable_params,
-        'total_mb': total_params * 4 / (1024 ** 2)
-    }
+    total = sum(p.numel() for p in modelo.parameters())
+    train = sum(p.numel() for p in modelo.parameters() if p.requires_grad)
+    return {'total': total, 'entrenables': train, 'congelados': total - train, 'total_mb': total * 4 / (1024 ** 2)}

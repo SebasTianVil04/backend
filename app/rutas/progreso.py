@@ -822,9 +822,7 @@ async def obtener_ranking(
         resultados = (
             db.query(
                 Usuario.id,
-                Usuario.nombres,
-                Usuario.apellido_paterno,
-                Usuario.apellido_materno,
+                Usuario.nombre_usuario,
                 puntos_clases_col.label("puntos_clases"),
                 puntos_examenes_col.label("puntos_examenes"),
                 xp_total_col.label("xp_total"),
@@ -869,7 +867,7 @@ async def obtener_ranking(
             ranking_data.append(
                 {
                     "usuario_id": row.id,
-                    "nombre_usuario": f"{row.nombres} {row.apellido_paterno}",
+                    "nombre_usuario": f"{row.nombre_usuario}",
                     "puntos_totales": puntos_clases + puntos_examenes,
                     "nivel": _calcular_nivel(xp_real),
                     "lecciones_completadas": lecciones_completadas_map.get(row.id, 0),
@@ -937,8 +935,7 @@ async def obtener_ranking(
                     {
                         "usuario_id": usuario_actual.id,
                         "nombre_usuario": (
-                            f"{usuario_actual.nombres} "
-                            f"{usuario_actual.apellido_paterno}"
+                            f"{usuario_actual.nombre_usuario} "
                         ),
                         "puntos_totales": totales_usuario["puntos_totales"],
                         "nivel": _calcular_nivel(totales_usuario["xp_total"]),

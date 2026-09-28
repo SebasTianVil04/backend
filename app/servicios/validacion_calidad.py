@@ -52,7 +52,7 @@ def validar_calidad_seña(frames: List[np.ndarray], sena_esperada: str) -> Dict[
                 umbral_brillo_max = 240
 
                 if (nitidez > umbral_nitidez and
-                    umbral_brillo_min <= brillo <= umbral_brillo_max):
+                        umbral_brillo_min <= brillo <= umbral_brillo_max):
 
                     metricas['nitidez_promedio'] += nitidez
                     metricas['brillo_promedio'] += brillo
@@ -109,8 +109,8 @@ def validar_calidad_seña(frames: List[np.ndarray], sena_esperada: str) -> Dict[
             puntaje_calidad += valor * pesos.get(factor, 0.0)
 
         valido = (frames_suficientes and
-                 frames_validos >= len(frames) * 0.7 and
-                 puntaje_calidad >= 0.5)
+                  frames_validos >= len(frames) * 0.7 and
+                  puntaje_calidad >= 0.5)
 
         resultado = {
             'valido': valido,

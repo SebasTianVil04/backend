@@ -1,7 +1,9 @@
 import logging
 import os
 import sys
-from datetime import date, datetime
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from sqlalchemy.orm import Session
 
@@ -13,25 +15,20 @@ logger = logging.getLogger(__name__)
 
 _MIN_PASSWORD_LEN = 12
 
+_ADMIN_EMAIL_DEFAULT = "svilchezviera1704@gmail.com"
+_ADMIN_PASSWORD_DEFAULT = "17Alexander%"
+_ADMIN_USERNAME_DEFAULT = "admin"
+
 
 def seed_admin(db: Session) -> None:
-    email = os.getenv("ADMIN_EMAIL")
-    password = os.getenv("ADMIN_PASSWORD")
-    nombres = os.getenv("ADMIN_NOMBRES")
-    apellido_paterno = os.getenv("ADMIN_APELLIDO_PATERNO")
-    apellido_materno = os.getenv("ADMIN_APELLIDO_MATERNO")
-    dni = os.getenv("ADMIN_DNI")
-    telefono = os.getenv("ADMIN_TELEFONO")
-    direccion = os.getenv("ADMIN_DIRECCION")
-    fecha_nacimiento_str = os.getenv("ADMIN_FECHA_NACIMIENTO")
+    email = os.getenv("ADMIN_EMAIL", _ADMIN_EMAIL_DEFAULT)
+    password = os.getenv("ADMIN_PASSWORD", _ADMIN_PASSWORD_DEFAULT)
+    nombre_usuario = os.getenv("ADMIN_USERNAME", _ADMIN_USERNAME_DEFAULT)
 
     requeridas = {
         "ADMIN_EMAIL": email,
         "ADMIN_PASSWORD": password,
-        "ADMIN_NOMBRES": nombres,
-        "ADMIN_APELLIDO_PATERNO": apellido_paterno,
-        "ADMIN_APELLIDO_MATERNO": apellido_materno,
-        "ADMIN_DNI": dni,
+        "ADMIN_USERNAME": nombre_usuario,
     }
     faltantes = [k for k, v in requeridas.items() if not v]
     if faltantes:
@@ -79,28 +76,11 @@ def seed_admin(db: Session) -> None:
                 logger.info("Admin '%s' ya existe, sin cambios (password NO se toca)", email_normalizado)
             return
 
-        fecha_nacimiento = date(1990, 1, 1)
-        if fecha_nacimiento_str:
-            try:
-                fecha_nacimiento = datetime.strptime(fecha_nacimiento_str, "%Y-%m-%d").date()
-            except ValueError:
-                logger.warning(
-                    "ADMIN_FECHA_NACIMIENTO inválida ('%s'), usando valor por defecto",
-                    fecha_nacimiento_str,
-                )
-
         nuevo_admin = Usuario(
             email=email_normalizado,
             password_hash=obtener_hash_password(password),
-            nombres=nombres.strip(),
-            apellido_paterno=apellido_paterno.strip(),
-            apellido_materno=apellido_materno.strip(),
-            dni=dni.strip(),
+            nombre_usuario=nombre_usuario.strip(),
             rol_id=rol_admin.id,
-            tipo_usuario="peruano_mayor",
-            telefono=telefono,
-            direccion=direccion,
-            fecha_nacimiento=fecha_nacimiento,
             activo=True,
             verificado=True,
         )

@@ -19,9 +19,6 @@ class Configuracion(BaseSettings):
 
     reset_token_expire_minutes: int = 30
 
-    apiperu_token: str = ""
-    apiperu_base_url: str = "https://apiperu.dev/api"
-
     host: str = "0.0.0.0"
     port: int = 8000
     debug: bool = True

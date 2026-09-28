@@ -9,7 +9,7 @@ class PermisoRespuesta(BaseModel):
     descripcion: str
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class RolRespuesta(BaseModel):
@@ -22,7 +22,7 @@ class RolRespuesta(BaseModel):
     permisos: List[PermisoRespuesta] = []
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
 class RolCrear(BaseModel):

@@ -28,8 +28,8 @@ CONFIG_SENAS = {
         'requiere_estabilidad': True,
         'umbral_confianza': 0.65,
         'procesamiento': 'frames_centrales',
-        'augmentation_brightness': (0.7, 1.3),
-        'augmentation_rotation': 15,
+        'augmentation_brightness': (0.8, 1.2),
+        'augmentation_rotation': 10,
         'prioridad': 'NORMAL',
     },
     'DINAMICA': {
@@ -39,7 +39,7 @@ CONFIG_SENAS = {
         'requiere_estabilidad': False,
         'umbral_confianza': 0.55,
         'procesamiento': 'distribucion_uniforme',
-        'augmentation_brightness': (0.6, 1.4),
+        'augmentation_brightness': (0.8, 1.2),
         'augmentation_rotation': 10,
         'prioridad': 'NORMAL',
     },
@@ -51,10 +51,10 @@ CONFIG_SENAS = {
         'umbral_confianza': 0.45,
         'confirmaciones_consecutivas_requeridas': 2,
         'procesamiento': 'prioridad_maxima',
-        'augmentation_brightness': (0.5, 1.5),
-        'augmentation_rotation': 20,
+        'augmentation_brightness': (0.7, 1.3),
+        'augmentation_rotation': 12,
         'prioridad': 'CRITICA',
-        'oversampling_minimo': '6x',
+        'oversampling_minimo': '4x',
     }
 }
 
@@ -194,7 +194,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     '0': {
         'confusiones_principales': ['C', 'O', 'Q', 'G'],
         'caracteristicas_clave': ['forma_circular_completa', 'pulgar_junto_dedos', 'apertura_minima'],
-        'penalizacion': 4.0,
+        'penalizacion': 3.0,
         'augmentation_especial': {
             'rotation_range': 1.5,
             'brightness_range': (0.95, 1.05),
@@ -211,7 +211,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     '1': {
         'confusiones_principales': ['D', 'I', 'L', 'J', 'T', 'B'],
         'caracteristicas_clave': ['dedo_indice_solo', 'vertical_estricto', 'otros_dedos_cerrados'],
-        'penalizacion': 4.0,
+        'penalizacion': 3.0,
         'augmentation_especial': {
             'rotation_range': 1.0,
             'brightness_range': (0.95, 1.05),
@@ -222,13 +222,14 @@ CONFIG_CONFUSIONES_NUMERICAS = {
         'diferencias_criticas': {
             'vs_D': 'D forma círculo con índice, 1 solo índice recto',
             'vs_I': 'I meñique solo, 1 es índice',
-            'vs_L': 'L tiene pulgar perpendicular, 1 no'
+            'vs_L': 'L tiene pulgar perpendicular, 1 no',
+            'vs_B': '1 extiende solo el índice, B extiende los cuatro dedos juntos'
         }
     },
     '2': {
         'confusiones_principales': ['V', 'U', 'N', 'K', 'Z'],
         'caracteristicas_clave': ['dos_dedos_separados', 'forma_V', 'palma_orientacion'],
-        'penalizacion': 3.5,
+        'penalizacion': 2.5,
         'augmentation_especial': {
             'rotation_range': 2.0,
             'brightness_range': (0.93, 1.07),
@@ -245,7 +246,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     '3': {
         'confusiones_principales': ['E', 'M', 'W', 'C'],
         'caracteristicas_clave': ['tres_dedos_extendidos', 'pulgar_meñique_juntos'],
-        'penalizacion': 3.5,
+        'penalizacion': 2.5,
         'augmentation_especial': {
             'rotation_range': 2.0,
             'brightness_range': (0.93, 1.07),
@@ -262,7 +263,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     '4': {
         'confusiones_principales': ['B', 'Y', 'X', 'K'],
         'caracteristicas_clave': ['cuatro_dedos_juntos', 'pulgar_cruzado'],
-        'penalizacion': 3.0,
+        'penalizacion': 2.0,
         'augmentation_especial': {
             'rotation_range': 2.5,
             'brightness_range': (0.92, 1.08),
@@ -278,7 +279,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     '5': {
         'confusiones_principales': ['S', 'A', '8', 'B'],
         'caracteristicas_clave': ['cinco_dedos_extendidos', 'mano_abierta_completa'],
-        'penalizacion': 2.5,
+        'penalizacion': 2.0,
         'augmentation_especial': {
             'rotation_range': 3.0,
             'brightness_range': (0.90, 1.10),
@@ -294,7 +295,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     '6': {
         'confusiones_principales': ['G', 'W', 'Q', 'F'],
         'caracteristicas_clave': ['pulgar_meñique_unidos', 'tres_dedos_medio_extendidos'],
-        'penalizacion': 3.0,
+        'penalizacion': 2.0,
         'augmentation_especial': {
             'rotation_range': 2.5,
             'brightness_range': (0.92, 1.08),
@@ -310,7 +311,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     '7': {
         'confusiones_principales': ['T', 'J', 'I', '1', 'L'],
         'caracteristicas_clave': ['pulgar_entre_indice_medio', 'orientacion_especifica'],
-        'penalizacion': 3.5,
+        'penalizacion': 2.5,
         'augmentation_especial': {
             'rotation_range': 1.5,
             'brightness_range': (0.94, 1.06),
@@ -326,7 +327,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     '8': {
         'confusiones_principales': ['H', 'S', 'U', '5', 'B'],
         'caracteristicas_clave': ['indice_medio_extendidos_juntos', 'orientacion_horizontal'],
-        'penalizacion': 3.0,
+        'penalizacion': 2.0,
         'augmentation_especial': {
             'rotation_range': 2.0,
             'brightness_range': (0.92, 1.08),
@@ -342,7 +343,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     '9': {
         'confusiones_principales': ['F', 'P', 'R', 'G'],
         'caracteristicas_clave': ['pulgar_indice_circulo', 'otros_dedos_juntos'],
-        'penalizacion': 3.0,
+        'penalizacion': 2.0,
         'augmentation_especial': {
             'rotation_range': 2.5,
             'brightness_range': (0.92, 1.08),
@@ -354,10 +355,28 @@ CONFIG_CONFUSIONES_NUMERICAS = {
             'vs_F': 'F círculo más pequeño, orientación diferente'
         }
     },
+    'B': {
+        'confusiones_principales': ['D', 'P', '1', '4', 'R'],
+        'caracteristicas_clave': ['cuatro_dedos_juntos_extendidos', 'pulgar_cruzado_sobre_palma', 'mano_plana_vertical'],
+        'penalizacion': 3.0,
+        'augmentation_especial': {
+            'rotation_range': 1.5,
+            'brightness_range': (0.95, 1.05),
+            'contrast_range': (0.98, 1.02),
+            'no_flip': True,
+            'no_zoom': True
+        },
+        'diferencias_criticas': {
+            'vs_D': 'B tiene los cuatro dedos juntos y extendidos, D solo el índice extendido en círculo con el pulgar',
+            'vs_P': 'P apunta hacia abajo con el pulgar entre índice y medio, B es vertical con dedos juntos',
+            'vs_1': '1 extiende solo el índice, B extiende los cuatro dedos',
+            'vs_4': '4 separa los cuatro dedos, B los mantiene juntos'
+        }
+    },
     'C': {
         'confusiones_principales': ['0', 'A', 'O', 'E', 'G'],
         'caracteristicas_clave': ['forma_C', 'apertura_lateral', 'no_circulo_completo'],
-        'penalizacion': 4.0,
+        'penalizacion': 3.0,
         'augmentation_especial': {
             'rotation_range': 1.5,
             'brightness_range': (0.95, 1.05),
@@ -374,7 +393,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     'D': {
         'confusiones_principales': ['1', 'B', 'P', 'F'],
         'caracteristicas_clave': ['indice_levantado_circulo', 'pulgar_tocando_medio'],
-        'penalizacion': 4.0,
+        'penalizacion': 3.0,
         'augmentation_especial': {
             'rotation_range': 1.5,
             'brightness_range': (0.95, 1.05),
@@ -390,7 +409,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     'O': {
         'confusiones_principales': ['0', 'C', 'Q', 'E'],
         'caracteristicas_clave': ['circulo_dedos_juntos', 'sin_apertura'],
-        'penalizacion': 4.0,
+        'penalizacion': 3.0,
         'augmentation_especial': {
             'rotation_range': 1.5,
             'brightness_range': (0.95, 1.05),
@@ -410,7 +429,7 @@ CONFIG_CONFUSIONES_EMERGENCIA = {
     'SOS': {
         'confusiones_principales': ['SOCORRO', 'AUXILIO', 'AYUDA'],
         'caracteristicas_clave': ['patron_repetitivo_marcado', 'expresion_facial_urgente'],
-        'penalizacion': 5.0,
+        'penalizacion': 4.0,
         'diferencias_criticas': {
             'vs_AYUDA': 'SOS suele repetirse/enfatizarse; AYUDA es una sola seña sin repetición marcada',
             'vs_SOCORRO': 'Verificar con un intérprete de LSP la forma exacta de cada una en la región del usuario',
@@ -419,7 +438,7 @@ CONFIG_CONFUSIONES_EMERGENCIA = {
     'EMERGENCIA': {
         'confusiones_principales': ['PELIGRO', 'ACCIDENTE'],
         'caracteristicas_clave': ['urgencia', 'movimiento_amplio'],
-        'penalizacion': 5.0,
+        'penalizacion': 4.0,
         'diferencias_criticas': {
             'vs_PELIGRO': 'EMERGENCIA implica necesidad de ayuda inmediata; PELIGRO advierte de un riesgo',
         }
@@ -431,30 +450,30 @@ tipo_sena_config = {
         'frames_entrenamiento': 8,
         'fps': 10,
         'augmentation': {
-            'brightness_range': (0.7, 1.3),
-            'rotation_range': 15,
-            'flip_prob': 0.5
+            'brightness_range': (0.8, 1.2),
+            'rotation_range': 10,
+            'flip_prob': 0.0
         }
     },
     'DINAMICA': {
         'frames_entrenamiento': 16,
         'fps': 15,
         'augmentation': {
-            'brightness_range': (0.6, 1.4),
+            'brightness_range': (0.8, 1.2),
             'rotation_range': 10,
-            'flip_prob': 0.5,
-            'noise_level': 10,
-            'frame_drop_prob': 0.3
+            'flip_prob': 0.0,
+            'noise_level': 8,
+            'frame_drop_prob': 0.2
         }
     },
     'EMERGENCIA': {
         'frames_entrenamiento': 20,
         'fps': 20,
         'augmentation': {
-            'brightness_range': (0.5, 1.5),
-            'rotation_range': 20,
+            'brightness_range': (0.7, 1.3),
+            'rotation_range': 12,
             'flip_prob': 0.0,
-            'noise_level': 15,
+            'noise_level': 10,
             'frame_drop_prob': 0.1
         }
     }
@@ -528,6 +547,7 @@ def es_sena_emergencia(nombre_sena: str) -> bool:
         return False
     return nombre_sena.lower().strip() in SENAS_EMERGENCIA
 
+
 def detectar_tipo_sena(nombre_sena: str) -> str:
     if not nombre_sena:
         return 'DINAMICA'
@@ -562,6 +582,7 @@ def detectar_tipo_sena(nombre_sena: str) -> str:
 
     return 'DINAMICA'
 
+
 def obtener_config_sena(nombre_sena: str) -> Dict[str, Any]:
     tipo_sena = detectar_tipo_sena(nombre_sena)
     config = CONFIG_SENAS[tipo_sena].copy()
@@ -580,11 +601,11 @@ def obtener_config_sena(nombre_sena: str) -> Dict[str, Any]:
         config['es_confusion_numerica'] = True
         config['confusiones_principales'] = config_confusion_numerica.get('confusiones_principales', [])
         config['caracteristicas_clave'] = config_confusion_numerica.get('caracteristicas_clave', [])
-        config['penalizacion_especial'] = config_confusion_numerica.get('penalizacion', 4.0)
+        config['penalizacion_especial'] = config_confusion_numerica.get('penalizacion', 3.0)
         config['diferencias_criticas'] = config_confusion_numerica.get('diferencias_criticas', {})
 
         augmentation_especial = config_confusion_numerica.get('augmentation_especial', {})
-        config['augmentation_rotation'] = augmentation_especial.get('rotation_range', 1.5)
+        config['augmentation_rotation'] = augmentation_especial.get('rotation_range', 2.0)
         config['augmentation_brightness'] = augmentation_especial.get('brightness_range', (0.95, 1.05))
         config['augmentation_contrast'] = augmentation_especial.get('contrast_range', (0.98, 1.02))
         config['permite_flip'] = not augmentation_especial.get('no_flip', True)
@@ -593,22 +614,25 @@ def obtener_config_sena(nombre_sena: str) -> Dict[str, Any]:
         config['es_confusion_numerica'] = False
         config['confusiones_principales'] = config_confusion_emergencia.get('confusiones_principales', [])
         config['caracteristicas_clave'] = config_confusion_emergencia.get('caracteristicas_clave', [])
-        config['penalizacion_especial'] = config_confusion_emergencia.get('penalizacion', 5.0)
+        config['penalizacion_especial'] = config_confusion_emergencia.get('penalizacion', 4.0)
         config['diferencias_criticas'] = config_confusion_emergencia.get('diferencias_criticas', {})
         config['permite_flip'] = False
         config['permite_zoom'] = False
     elif config['es_confusa']:
-        config['augmentation_rotation'] = 3.0
+        config['augmentation_rotation'] = 5.0
         config['augmentation_brightness'] = (0.9, 1.1)
         config['augmentation_contrast'] = (0.95, 1.05)
+        config['permite_zoom'] = config.get('permite_zoom', True)
 
     config['grupo_confusion'] = obtener_grupo_confusion(nombre_sena)
 
     return config
 
+
 def obtener_confusiones_comunes(sena: str) -> List[str]:
     sena_upper = sena.upper()
     return CONFUSIONES_COMUNES.get(sena_upper, [])
+
 
 def es_confusion_comun(sena_esperada: str, sena_detectada: str) -> bool:
     if sena_esperada.upper() == sena_detectada.upper():
@@ -617,9 +641,11 @@ def es_confusion_comun(sena_esperada: str, sena_detectada: str) -> bool:
     confusiones = obtener_confusiones_comunes(sena_esperada)
     return sena_detectada.upper() in [c.upper() for c in confusiones]
 
+
 def obtener_config_confusion_numerica(sena: str) -> Dict[str, Any]:
     sena_upper = sena.upper()
     return CONFIG_CONFUSIONES_NUMERICAS.get(sena_upper, {})
+
 
 def es_confusion_numerica(sena_esperada: str, sena_detectada: str) -> bool:
     sena_esperada_upper = sena_esperada.upper()
@@ -639,6 +665,7 @@ def es_confusion_numerica(sena_esperada: str, sena_detectada: str) -> bool:
 
     return False
 
+
 def calcular_factor_confusion_mejorado(sena_esperada: str, sena_detectada: str) -> float:
     if sena_esperada.upper() == sena_detectada.upper():
         return 1.0
@@ -649,36 +676,38 @@ def calcular_factor_confusion_mejorado(sena_esperada: str, sena_detectada: str) 
     if es_sena_emergencia(sena_esperada) or es_sena_emergencia(sena_detectada):
         conf_emergencia = CONFIG_CONFUSIONES_EMERGENCIA.get(sena_esperada_upper, {})
         if sena_detectada_upper in conf_emergencia.get('confusiones_principales', []):
-            return conf_emergencia.get('penalizacion', 5.0)
+            return conf_emergencia.get('penalizacion', 4.0)
         conf_emergencia_inversa = CONFIG_CONFUSIONES_EMERGENCIA.get(sena_detectada_upper, {})
         if sena_esperada_upper in conf_emergencia_inversa.get('confusiones_principales', []):
-            return conf_emergencia_inversa.get('penalizacion', 5.0)
+            return conf_emergencia_inversa.get('penalizacion', 4.0)
         if es_confusion_comun(sena_esperada, sena_detectada):
-            return 4.5
+            return 3.5
 
     if es_confusion_numerica(sena_esperada, sena_detectada):
         confusiones_criticas = [
             ('0', 'C'), ('0', 'O'), ('C', '0'), ('O', '0'),
             ('1', 'D'), ('1', 'I'), ('1', 'L'), ('D', '1'),
+            ('1', 'B'), ('B', '1'),
             ('2', 'V'), ('2', 'U'), ('V', '2'), ('U', '2'),
             ('3', 'E'), ('3', 'M'), ('E', '3'), ('M', '3'),
         ]
 
         if (sena_esperada_upper, sena_detectada_upper) in confusiones_criticas:
-            return 4.5
+            return 3.5
 
-        return 4.0
+        return 3.0
 
     grupo_esperada = obtener_grupo_confusion(sena_esperada)
     if grupo_esperada and sena_detectada_upper in grupo_esperada:
         if grupo_esperada == {'A', 'C', 'S', 'E', 'M', 'N', 'T'}:
-            return 4.0
-        return 3.5
-
-    if es_confusion_comun(sena_esperada, sena_detectada):
+            return 3.0
         return 2.5
 
-    return 1.5
+    if es_confusion_comun(sena_esperada, sena_detectada):
+        return 2.0
+
+    return 1.3
+
 
 def obtener_grupo_confusion(sena: str) -> Optional[Set[str]]:
     sena_upper = sena.upper()
@@ -687,11 +716,13 @@ def obtener_grupo_confusion(sena: str) -> Optional[Set[str]]:
             return grupo
     return None
 
+
 def calcular_factor_confusion(sena_esperada: str, sena_detectada: str) -> float:
     return calcular_factor_confusion_mejorado(sena_esperada, sena_detectada)
 
+
 def generar_alerta_emergencia(sena_detectada: str, confianza: float,
-                               detecciones_consecutivas: int = 1) -> Dict[str, Any]:
+                              detecciones_consecutivas: int = 1) -> Dict[str, Any]:
     if not es_sena_emergencia(sena_detectada):
         return {
             'es_emergencia': False,
@@ -721,9 +752,11 @@ def generar_alerta_emergencia(sena_detectada: str, confianza: float,
         )
     }
 
+
 def obtener_prioridad_procesamiento(nombre_sena: str) -> str:
     tipo = detectar_tipo_sena(nombre_sena)
     return CONFIG_SENAS[tipo].get('prioridad', 'NORMAL')
+
 
 def generar_guia_aprendizaje_emergencia() -> List[Dict[str, Any]]:
     guia = []
@@ -748,10 +781,12 @@ def generar_guia_aprendizaje_emergencia() -> List[Dict[str, Any]]:
         })
     return guia
 
+
 def es_categoria_emergencia(senas: List[str]) -> bool:
     if not senas:
         return False
     return any(es_sena_emergencia(s) for s in senas)
+
 
 def validar_consistencia_categoria(senas: List[str]) -> Dict[str, Any]:
     tipos = [detectar_tipo_sena(sena) for sena in senas]
@@ -811,6 +846,7 @@ def validar_consistencia_categoria(senas: List[str]) -> Dict[str, Any]:
         'nivel_dificultad': nivel_dificultad
     }
 
+
 def es_categoria_alfabeto(senas: List[str]) -> bool:
     if not senas:
         return False
@@ -819,6 +855,7 @@ def es_categoria_alfabeto(senas: List[str]) -> bool:
     conteo_letras = sum(1 for sena in senas if sena.lower() in letras_alfabeto)
 
     return conteo_letras / len(senas) > 0.7
+
 
 def es_categoria_numeros(senas: List[str]) -> bool:
     if not senas:
@@ -829,6 +866,7 @@ def es_categoria_numeros(senas: List[str]) -> bool:
 
     return conteo_numeros / len(senas) > 0.7
 
+
 def obtener_parametros_entrenamiento(senas: List[str]) -> Dict[str, Any]:
     analisis_consistencia = validar_consistencia_categoria(senas)
     es_alfabeto = es_categoria_alfabeto(senas)
@@ -838,75 +876,80 @@ def obtener_parametros_entrenamiento(senas: List[str]) -> Dict[str, Any]:
     parametros = {
         'batch_size': 8,
         'num_frames': 16,
-        'learning_rate': 0.001,
-        'epochs': 150,
+        'learning_rate': 0.0008,
+        'epochs': 120,
         'weight_decay': 1e-4,
-        'patience': 30
+        'patience': 25
     }
 
     nivel_dificultad = analisis_consistencia['nivel_dificultad']
 
     if nivel_dificultad == 'CRITICA_SEGURIDAD':
-        parametros['learning_rate'] = 0.0002
-        parametros['epochs'] = 300
-        parametros['patience'] = 50
-        parametros['confusion_penalty'] = 5.0
-        parametros['focal_gamma'] = 3.0
-        parametros['oversampling'] = '6x para señas de emergencia'
+        parametros['learning_rate'] = 0.0005
+        parametros['epochs'] = 200
+        parametros['patience'] = 40
+        parametros['confusion_penalty'] = 3.5
+        parametros['focal_gamma'] = 1.5
+        parametros['label_smoothing'] = 0.05
+        parametros['oversampling'] = '4x para señas de emergencia'
         parametros['prioridad_seguridad'] = True
 
     elif nivel_dificultad == 'MUY_ALTO':
-        parametros['learning_rate'] = 0.0003
-        parametros['epochs'] = 250
-        parametros['patience'] = 40
-        parametros['confusion_penalty'] = 4.5
-        parametros['focal_gamma'] = 2.5
-        parametros['oversampling'] = '4x para numéricas, 3x para críticas'
+        parametros['learning_rate'] = 0.0005
+        parametros['epochs'] = 180
+        parametros['patience'] = 35
+        parametros['confusion_penalty'] = 3.0
+        parametros['focal_gamma'] = 1.5
+        parametros['label_smoothing'] = 0.05
+        parametros['oversampling'] = '2.5x para numéricas'
 
     elif nivel_dificultad == 'ALTO':
-        parametros['learning_rate'] = 0.0005
-        parametros['epochs'] = 200
-        parametros['patience'] = 35
-        parametros['confusion_penalty'] = 4.0
-        parametros['focal_gamma'] = 2.5
-        parametros['oversampling'] = '3x para críticas, 2x para confusas'
+        parametros['learning_rate'] = 0.0007
+        parametros['epochs'] = 160
+        parametros['patience'] = 30
+        parametros['confusion_penalty'] = 2.5
+        parametros['focal_gamma'] = 1.5
+        parametros['label_smoothing'] = 0.05
+        parametros['oversampling'] = '2x para críticas'
 
     elif nivel_dificultad == 'MEDIO':
-        parametros['learning_rate'] = 0.0007
-        parametros['epochs'] = 175
-        parametros['patience'] = 33
-        parametros['confusion_penalty'] = 3.0
-        parametros['focal_gamma'] = 2.0
-        parametros['oversampling'] = '2x para confusas'
+        parametros['learning_rate'] = 0.0008
+        parametros['epochs'] = 140
+        parametros['patience'] = 28
+        parametros['confusion_penalty'] = 2.0
+        parametros['focal_gamma'] = 1.5
+        parametros['label_smoothing'] = 0.05
+        parametros['oversampling'] = '1.5x para confusas'
 
     else:
-        parametros['confusion_penalty'] = 2.0
-        parametros['focal_gamma'] = 2.0
+        parametros['confusion_penalty'] = 1.5
+        parametros['focal_gamma'] = 1.5
+        parametros['label_smoothing'] = 0.05
         parametros['oversampling'] = '1x proporcional'
 
     if analisis_consistencia['tipo_mayoritario'] == 'ESTATICA':
         parametros['num_frames'] = 8
-        parametros['batch_size'] = 12
+        parametros['batch_size'] = 16
     elif analisis_consistencia['tipo_mayoritario'] == 'EMERGENCIA':
         parametros['num_frames'] = 20
-        parametros['batch_size'] = 6
+        parametros['batch_size'] = 8
     else:
         parametros['num_frames'] = 16
-        parametros['batch_size'] = 6
+        parametros['batch_size'] = 8
 
     if es_alfabeto:
-        parametros['epochs'] = max(parametros['epochs'], 250)
-        parametros['learning_rate'] = min(parametros['learning_rate'], 0.0003)
+        parametros['epochs'] = max(parametros['epochs'], 150)
+        parametros['learning_rate'] = min(parametros['learning_rate'], 0.0008)
 
     if es_numeros:
-        parametros['epochs'] = max(parametros['epochs'], 300)
-        parametros['learning_rate'] = 0.0003
-        parametros['confusion_penalty'] = 4.5
+        parametros['epochs'] = max(parametros['epochs'], 180)
+        parametros['learning_rate'] = 0.0006
+        parametros['confusion_penalty'] = 3.0
 
     if es_emergencia:
-        parametros['epochs'] = max(parametros['epochs'], 300)
-        parametros['learning_rate'] = min(parametros['learning_rate'], 0.0002)
-        parametros['confusion_penalty'] = max(parametros['confusion_penalty'], 5.0)
+        parametros['epochs'] = max(parametros['epochs'], 200)
+        parametros['learning_rate'] = min(parametros['learning_rate'], 0.0005)
+        parametros['confusion_penalty'] = max(parametros['confusion_penalty'], 3.5)
         parametros['prioridad_seguridad'] = True
 
     return {
@@ -921,89 +964,89 @@ def obtener_parametros_entrenamiento(senas: List[str]) -> Dict[str, Any]:
         )
     }
 
+
 def generar_recomendaciones_entrenamiento(consistencia: Dict[str, Any],
-                                           es_alfabeto: bool,
-                                           es_numeros: bool) -> List[str]:
+                                          es_alfabeto: bool,
+                                          es_numeros: bool) -> List[str]:
     recomendaciones = []
     nivel_dificultad = consistencia.get('nivel_dificultad', 'MEDIO')
 
     if consistencia['consistente']:
         if consistencia['tipo_mayoritario'] == 'ESTATICA':
-            recomendaciones.append("✅ Categoría estática - usar 8 frames y procesamiento optimizado")
+            recomendaciones.append("Categoría estática - usar 8 frames y procesamiento optimizado")
         elif consistencia['tipo_mayoritario'] == 'EMERGENCIA':
-            recomendaciones.append("🆘 Categoría de EMERGENCIA - usar 20 frames y procesamiento prioritario")
+            recomendaciones.append("Categoría de EMERGENCIA - usar 20 frames y procesamiento prioritario")
         else:
-            recomendaciones.append("✅ Categoría dinámica - usar 16 frames y captura de movimiento")
+            recomendaciones.append("Categoría dinámica - usar 16 frames y captura de movimiento")
     else:
-        recomendaciones.append("⚠️  Categoría mixta - usar modelo adaptativo con doble backbone")
+        recomendaciones.append("Categoría mixta - usar modelo adaptativo con doble backbone")
 
     if es_alfabeto:
-        recomendaciones.append("📚 Categoría ALFABETO - entrenar con LR bajo (0.0003) y 250+ épocas")
+        recomendaciones.append("Categoría ALFABETO - entrenar con LR bajo (0.0008) y 150+ épocas")
 
     if es_numeros:
-        recomendaciones.append("🔢 Categoría NÚMEROS - máxima precaución con confusiones numéricas")
-        recomendaciones.append("   → Usar augmentation ultra-conservador")
-        recomendaciones.append("   → NO aplicar flip horizontal")
-        recomendaciones.append("   → Oversampling 4x")
+        recomendaciones.append("Categoría NÚMEROS - máxima precaución con confusiones numéricas")
+        recomendaciones.append("   -> Usar augmentation ultra-conservador")
+        recomendaciones.append("   -> NO aplicar flip horizontal")
+        recomendaciones.append("   -> Oversampling 2.5x")
 
     if consistencia.get('senas_emergencia'):
         recomendaciones.append(
-            f"🆘🆘🆘 SEÑAS DE EMERGENCIA presentes ({len(consistencia['senas_emergencia'])}): "
+            f"SEÑAS DE EMERGENCIA presentes ({len(consistencia['senas_emergencia'])}): "
             "un falso negativo aquí puede impedir que alguien pida ayuda real."
         )
-        recomendaciones.append("   → Umbral de confianza más bajo (0.45) + confirmación temporal (2 detecciones)")
-        recomendaciones.append("   → NO aplicar flip horizontal, orientación importa")
-        recomendaciones.append("   → Oversampling mínimo 6x")
-        recomendaciones.append("   → Probar el modelo con usuarios reales antes de desplegarlo")
-        recomendaciones.append("   → Ofrecer también un botón físico/manual de SOS como respaldo, no depender solo del modelo")
+        recomendaciones.append("   -> Umbral de confianza más bajo (0.45) + confirmación temporal (2 detecciones)")
+        recomendaciones.append("   -> NO aplicar flip horizontal, orientación importa")
+        recomendaciones.append("   -> Oversampling mínimo 4x")
+        recomendaciones.append("   -> Probar el modelo con usuarios reales antes de desplegarlo")
+        recomendaciones.append("   -> Ofrecer también un botón físico/manual de SOS como respaldo")
 
     if nivel_dificultad == 'CRITICA_SEGURIDAD':
-        recomendaciones.append("🆘 PRIORIDAD DE SEGURIDAD - por encima de cualquier otra dificultad")
-        recomendaciones.append("   → Learning rate: 0.0002")
-        recomendaciones.append("   → Epochs: 300+")
-        recomendaciones.append("   → Penalización: 5.0x")
+        recomendaciones.append("PRIORIDAD DE SEGURIDAD - por encima de cualquier otra dificultad")
+        recomendaciones.append("   -> Learning rate: 0.0005")
+        recomendaciones.append("   -> Epochs: 200+")
+        recomendaciones.append("   -> Penalización: 3.5x")
 
     elif nivel_dificultad == 'MUY_ALTO':
-        recomendaciones.append("🔴🔴🔴 DIFICULTAD MUY ALTA - Confusiones numéricas detectadas")
-        recomendaciones.append("   → Learning rate: 0.0003")
-        recomendaciones.append("   → Epochs: 250+")
-        recomendaciones.append("   → Penalización: 4.5x")
-        recomendaciones.append("   → Augmentation: ±5% brightness, ±1.5° rotation")
-        recomendaciones.append("   → Oversampling: 4x para confusas numéricas")
+        recomendaciones.append("DIFICULTAD MUY ALTA - Confusiones numéricas detectadas")
+        recomendaciones.append("   -> Learning rate: 0.0005")
+        recomendaciones.append("   -> Epochs: 180+")
+        recomendaciones.append("   -> Penalización: 3.0x")
+        recomendaciones.append("   -> Augmentation: ±5% brightness, ±2° rotation")
 
     elif nivel_dificultad == 'ALTO':
-        recomendaciones.append("🔴🔴 DIFICULTAD ALTA - Grupo crítico detectado")
-        recomendaciones.append("   → Learning rate: 0.0005")
-        recomendaciones.append("   → Epochs: 200+")
-        recomendaciones.append("   → Penalización: 4.0x")
-        recomendaciones.append("   → Oversampling: 3x para grupo crítico")
+        recomendaciones.append("DIFICULTAD ALTA - Grupo crítico detectado")
+        recomendaciones.append("   -> Learning rate: 0.0007")
+        recomendaciones.append("   -> Epochs: 160+")
+        recomendaciones.append("   -> Penalización: 2.5x")
 
     elif nivel_dificultad == 'MEDIO':
-        recomendaciones.append("🟡 DIFICULTAD MEDIA - Señas confusas presentes")
-        recomendaciones.append("   → Learning rate: 0.0007")
-        recomendaciones.append("   → Epochs: 175")
-        recomendaciones.append("   → Penalización: 3.0x")
+        recomendaciones.append("DIFICULTAD MEDIA - Señas confusas presentes")
+        recomendaciones.append("   -> Learning rate: 0.0008")
+        recomendaciones.append("   -> Epochs: 140")
+        recomendaciones.append("   -> Penalización: 2.0x")
 
     else:
-        recomendaciones.append("🟢 DIFICULTAD BAJA - Sin confusiones significativas")
-        recomendaciones.append("   → Parámetros estándar")
+        recomendaciones.append("DIFICULTAD BAJA - Sin confusiones significativas")
+        recomendaciones.append("   -> Parámetros estándar")
 
     if consistencia.get('senas_confusion_numerica'):
-        recomendaciones.append(f"\n⚠️⚠️⚠️  CRÍTICO: {len(consistencia['senas_confusion_numerica'])} señas con confusión numérica:")
+        recomendaciones.append(f"CRÍTICO: {len(consistencia['senas_confusion_numerica'])} señas con confusión numérica:")
         for sena in consistencia['senas_confusion_numerica'][:5]:
             config = obtener_config_confusion_numerica(sena)
             confusiones = config.get('confusiones_principales', [])
-            recomendaciones.append(f"   • {sena} ↔ {', '.join(confusiones)}")
+            recomendaciones.append(f"   - {sena} <-> {', '.join(confusiones)}")
 
     if consistencia.get('senas_grupo_critico'):
-        recomendaciones.append(f"\n⚠️⚠️  ATENCIÓN: {len(consistencia['senas_grupo_critico'])} señas en grupo crítico:")
+        recomendaciones.append(f"ATENCIÓN: {len(consistencia['senas_grupo_critico'])} señas en grupo crítico:")
         recomendaciones.append(f"   {', '.join(consistencia['senas_grupo_critico'][:10])}")
 
     if consistencia['total_senas'] < 10:
-        recomendaciones.append("\n💡 SUGERENCIA: Pocas señas para entrenar")
-        recomendaciones.append("   → Considerar agregar más clases para mejor generalización")
+        recomendaciones.append("SUGERENCIA: Pocas señas para entrenar")
+        recomendaciones.append("   -> Considerar agregar más clases para mejor generalización")
 
     return recomendaciones
+
 
 def analizar_pares_confusion(clases: List[str]) -> Dict[str, Any]:
     pares_confusion = []
@@ -1024,7 +1067,7 @@ def analizar_pares_confusion(clases: List[str]) -> Dict[str, Any]:
                     }
                     pares_confusion.append(par)
 
-                    if factor >= 4.0:
+                    if factor >= 3.0:
                         pares_criticos.append(par)
 
     return {
@@ -1033,6 +1076,7 @@ def analizar_pares_confusion(clases: List[str]) -> Dict[str, Any]:
         'pares_confusion': sorted(pares_confusion, key=lambda x: x['factor_penalizacion'], reverse=True),
         'pares_criticos_detalle': sorted(pares_criticos, key=lambda x: x['factor_penalizacion'], reverse=True)
     }
+
 
 def generar_matriz_confusion_teorica(clases: List[str]) -> Dict[str, List[str]]:
     matriz = {}
@@ -1049,6 +1093,7 @@ def generar_matriz_confusion_teorica(clases: List[str]) -> Dict[str, List[str]]:
             matriz[clase] = confusiones_posibles
 
     return matriz
+
 
 def exportar_configuracion_confusiones(clases: List[str], ruta_salida: str = None):
     analisis = {
@@ -1067,6 +1112,7 @@ def exportar_configuracion_confusiones(clases: List[str], ruta_salida: str = Non
         logger.info(f"Configuración de confusiones exportada: {ruta_salida}")
 
     return analisis
+
 
 def calibrar_modelo_usuario(usuario_id: int, senas_calibracion: Dict[str, str]) -> Dict[str, Any]:
     resultados = {}
@@ -1103,6 +1149,7 @@ def calibrar_modelo_usuario(usuario_id: int, senas_calibracion: Dict[str, str]) 
         'fecha_calibracion': datetime.now().isoformat()
     }
 
+
 def generar_recomendaciones_calibracion(errores: Dict[str, Any]) -> List[str]:
     recomendaciones = []
     confusiones_numericas = 0
@@ -1114,7 +1161,7 @@ def generar_recomendaciones_calibracion(errores: Dict[str, Any]) -> List[str]:
             confusiones_emergencia += 1
             sena_confundida = info_error.get('sena_confundida', 'desconocida')
             recomendaciones.append(
-                f"🆘 CRÍTICO DE SEGURIDAD: '{sena}' se confundió con '{sena_confundida}'. "
+                f"CRÍTICO DE SEGURIDAD: '{sena}' se confundió con '{sena_confundida}'. "
                 "Practica esta seña de emergencia con especial cuidado y, si es posible, "
                 "pide a un intérprete de LSP que revise tu ejecución."
             )
@@ -1127,57 +1174,58 @@ def generar_recomendaciones_calibracion(errores: Dict[str, Any]) -> List[str]:
                 clave_diff = f"vs_{sena_confundida}"
                 if clave_diff in diferencias:
                     recomendaciones.append(
-                        f"🔴 CRÍTICO '{sena}' ↔ '{sena_confundida}': {diferencias[clave_diff]}"
+                        f"CRÍTICO '{sena}' <-> '{sena_confundida}': {diferencias[clave_diff]}"
                     )
                 else:
                     recomendaciones.append(
-                        f"🔴 Confusión numérica: '{sena}' se confunde con '{sena_confundida}'"
+                        f"Confusión numérica: '{sena}' se confunde con '{sena_confundida}'"
                     )
         elif info_error.get('confusion_comun'):
             confusiones_comunes += 1
             sena_confundida = info_error.get('sena_confundida', 'desconocida')
             recomendaciones.append(
-                f"⚠️  Confusión común: '{sena}' ↔ '{sena_confundida}'. "
+                f"Confusión común: '{sena}' <-> '{sena_confundida}'. "
                 f"Practica las diferencias clave."
             )
         elif info_error.get('tipo_corregido'):
             tipo_esperado = info_error['tipo_corregido']
             recomendaciones.append(
-                f"ℹ️  Seña '{sena}' es {tipo_esperado.lower()}. "
+                f"Seña '{sena}' es {tipo_esperado.lower()}. "
                 f"Ejecuta la seña {'sin movimiento' if tipo_esperado == 'ESTATICA' else 'con movimiento fluido'}."
             )
 
     if confusiones_emergencia > 0:
         recomendaciones.append(
-            f"\n🆘 {confusiones_emergencia} confusiones en señas de EMERGENCIA. "
+            f"{confusiones_emergencia} confusiones en señas de EMERGENCIA. "
             "Esto tiene la máxima prioridad de todas: practica estas señas primero."
         )
 
     if confusiones_numericas > 0:
         recomendaciones.append(
-            f"\n🔴 {confusiones_numericas} confusiones NUMÉRICAS críticas detectadas. "
+            f"{confusiones_numericas} confusiones NUMÉRICAS críticas detectadas. "
             "Estas son las más difíciles. Practica con especial cuidado."
         )
 
     if confusiones_comunes > 3:
         recomendaciones.append(
-            f"\n⚠️  {confusiones_comunes} confusiones comunes detectadas. "
+            f"{confusiones_comunes} confusiones comunes detectadas. "
             "Considera mejorar iluminación y ángulo de cámara."
         )
 
     if len(errores) > 5:
         recomendaciones.append(
-            "\n💡 SUGERENCIA: Muchos errores detectados. Recomendaciones:"
-            "\n   • Verifica la iluminación (luz frontal uniforme)"
-            "\n   • Ajusta el ángulo de la cámara"
-            "\n   • Mantén la mano a distancia adecuada"
-            "\n   • Practica las señas básicas primero"
+            "SUGERENCIA: Muchos errores detectados. Recomendaciones:"
+            "\n   - Verifica la iluminación (luz frontal uniforme)"
+            "\n   - Ajusta el ángulo de la cámara"
+            "\n   - Mantén la mano a distancia adecuada"
+            "\n   - Practica las señas básicas primero"
         )
 
     if not recomendaciones:
-        recomendaciones.append("✅ Calibración exitosa. No se detectaron errores significativos.")
+        recomendaciones.append("Calibración exitosa. No se detectaron errores significativos.")
 
     return recomendaciones
+
 
 def obtener_estadisticas_confusiones() -> Dict[str, Any]:
     total_senas = len(CONFUSIONES_COMUNES)
@@ -1205,6 +1253,7 @@ def obtener_estadisticas_confusiones() -> Dict[str, Any]:
         )[:10]
     }
 
+
 def verificar_clases_referenciadas() -> Dict[str, Any]:
     clases_validas = set()
     clases_validas.update(c.upper() for c in 'abcdefghijklmnopqrstuvwxyzñ')
@@ -1227,6 +1276,7 @@ def verificar_clases_referenciadas() -> Dict[str, Any]:
         'total_problemas': len(referencias_invalidas)
     }
 
+
 def validar_integridad_configuracion() -> Dict[str, Any]:
     errores = []
     advertencias = []
@@ -1236,7 +1286,7 @@ def validar_integridad_configuracion() -> Dict[str, Any]:
             if conf in CONFUSIONES_COMUNES:
                 if sena not in CONFUSIONES_COMUNES[conf]:
                     advertencias.append(
-                        f"Confusión no bidireccional: {sena} → {conf}, pero {conf} no lista a {sena}"
+                        f"Confusión no bidireccional: {sena} -> {conf}, pero {conf} no lista a {sena}"
                     )
 
     for sena in CONFIG_CONFUSIONES_NUMERICAS.keys():

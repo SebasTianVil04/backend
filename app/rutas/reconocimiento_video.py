@@ -3,12 +3,14 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+import numpy as np
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from ..utilidades.base_datos import obtener_bd
 from ..utilidades.seguridad import obtener_usuario_actual
+from ..dependencias.permisos import requiere_permiso
 from ..modelos.usuario import Usuario
 from ..modelos.entrenamiento import ModeloIA
 from ..servicios.gestor_reconocimiento import (
@@ -16,14 +18,17 @@ from ..servicios.gestor_reconocimiento import (
     obtener_reconocedor_cacheado,
     determinar_tipo_sena,
     procesar_frame_base64,
-    extraer_keypoints_frame,
     limpiar_cache,
     cerrar_mediapipe_hands,
     info_cache,
 )
+from ..servicios.extractor_secuencias import normalizar_fila
 
 router = APIRouter(prefix="/reconocimiento-video", tags=["Reconocimiento Video"])
 logger = logging.getLogger(__name__)
+
+FEATURES_POR_MANO = 63
+FEATURES_TOTALES = 126
 
 
 class FrameData(BaseModel):
@@ -46,8 +51,44 @@ CATEGORIAS_CALIDAD = (
     (0.50, "baja", "Baja confianza"),
 )
 
+MAX_FRAMES_ENTRADA = 120
+MIN_FRAMES_CON_MANO = 4
 
-MAX_FRAMES_EXTRACCION = 15
+
+def _landmarks_a_fila(landmarks: Any) -> Optional[np.ndarray]:
+    if not landmarks or not isinstance(landmarks, (list, tuple)):
+        return None
+
+    fila = np.zeros(FEATURES_TOTALES, dtype=np.float32)
+    hay_datos = False
+
+    for idx, mano in enumerate(landmarks[:2]):
+        if not isinstance(mano, (list, tuple)) or len(mano) < 21:
+            continue
+
+        base = idx * FEATURES_POR_MANO
+        for j in range(21):
+            punto = mano[j]
+            if isinstance(punto, dict):
+                x = float(punto.get('x', 0.0) or 0.0)
+                y = float(punto.get('y', 0.0) or 0.0)
+                z = float(punto.get('z', 0.0) or 0.0)
+            else:
+                x = float(getattr(punto, 'x', 0.0) or 0.0)
+                y = float(getattr(punto, 'y', 0.0) or 0.0)
+                z = float(getattr(punto, 'z', 0.0) or 0.0)
+            fila[base + j * 3] = x
+            fila[base + j * 3 + 1] = y
+            fila[base + j * 3 + 2] = z
+        hay_datos = True
+
+    if not hay_datos:
+        return None
+
+    try:
+        return normalizar_fila(fila)
+    except Exception:
+        return fila
 
 
 def _evaluar_calidad(confianza: float, sena_detectada: str) -> Dict[str, str]:
@@ -57,8 +98,24 @@ def _evaluar_calidad(confianza: float, sena_detectada: str) -> Dict[str, str]:
     return {"calidad": "muy_baja", "mensaje": "Seña no reconocida claramente"}
 
 
+def _respuesta_fallida(mensaje, categoria_id, frames_procesados=0, errores=None):
+    r = {
+        "exito": False,
+        "mensaje": mensaje,
+        "datos": {
+            "confianza": 0.0,
+            "sena_detectada": "",
+            "num_frames_procesados": frames_procesados,
+            "categoria_id": categoria_id
+        }
+    }
+    if errores:
+        r["errores"] = errores
+    return r
+
+
 @router.post("/secuencia", response_model=Dict[str, Any])
-async def reconocer_secuencia_video(
+def reconocer_secuencia_video(
     solicitud: SolicitudVideoSecuencia,
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
@@ -67,48 +124,73 @@ async def reconocer_secuencia_video(
 
     try:
         num_frames_recibidos = len(solicitud.frames)
+
+        if num_frames_recibidos == 0:
+            return _respuesta_fallida("No se recibieron frames", solicitud.categoria_id)
+
+        if num_frames_recibidos > MAX_FRAMES_ENTRADA:
+            return _respuesta_fallida(
+                f"Demasiados frames ({num_frames_recibidos}, máx {MAX_FRAMES_ENTRADA})",
+                solicitud.categoria_id
+            )
+
         reconocedor, modelo_id = obtener_reconocedor(db, solicitud.categoria_id)
 
-        frames_a_procesar = (
-            solicitud.frames[-MAX_FRAMES_EXTRACCION:]
-            if num_frames_recibidos > MAX_FRAMES_EXTRACCION
-            else solicitud.frames
-        )
-        if num_frames_recibidos > MAX_FRAMES_EXTRACCION:
-            logger.info(f"Optimizando: {num_frames_recibidos} -> {MAX_FRAMES_EXTRACCION} frames")
+        keypoints_cliente: List[np.ndarray] = []
+        for frame_data in solicitud.frames:
+            if frame_data.landmarks:
+                fila = _landmarks_a_fila(frame_data.landmarks)
+                if fila is not None:
+                    keypoints_cliente.append(fila)
 
-        keypoints_secuencia = []
-        for frame_data in frames_a_procesar:
-            frame = procesar_frame_base64(frame_data.frame_base64)
-            if frame is None:
-                continue
-            keypoints = extraer_keypoints_frame(frame)
-            if keypoints is not None:
-                keypoints_secuencia.append(keypoints)
+        usar_landmarks = len(keypoints_cliente) >= MIN_FRAMES_CON_MANO
 
-        frames_exitosos = len(keypoints_secuencia)
+        if usar_landmarks:
+            resultado_secuencia = reconocedor._resultado_desde_keypoints(keypoints_cliente)
+        else:
+            frames_validos: List[np.ndarray] = []
+            for frame_data in solicitud.frames:
+                frame = procesar_frame_base64(frame_data.frame_base64)
+                if frame is not None:
+                    frames_validos.append(frame)
 
-        if frames_exitosos < 4:
-            return {
-                "exito": False,
-                "mensaje": f"Frames insuficientes ({frames_exitosos}/4)",
-                "datos": {
-                    "confianza": 0.0,
-                    "sena_detectada": "",
-                    "num_frames_procesados": frames_exitosos,
-                    "categoria_id": solicitud.categoria_id
-                }
-            }
+            if len(frames_validos) < MIN_FRAMES_CON_MANO:
+                return _respuesta_fallida(
+                    f"Frames inválidos ({len(frames_validos)}/{MIN_FRAMES_CON_MANO})",
+                    solicitud.categoria_id, len(frames_validos)
+                )
+            resultado_secuencia = reconocedor._resultado_desde_frames(frames_validos)
+
+        frames_exitosos = resultado_secuencia.frames_detectados
+
+        if frames_exitosos < MIN_FRAMES_CON_MANO:
+            return _respuesta_fallida(
+                f"Frames con mano insuficientes ({frames_exitosos}/{MIN_FRAMES_CON_MANO})",
+                solicitud.categoria_id, frames_exitosos
+            )
+
+        keypoints_secuencia = [
+            fila for fila, estado in zip(resultado_secuencia.secuencia, resultado_secuencia.estado)
+            if estado > 0
+        ]
 
         tipo_sena_inicial = determinar_tipo_sena(
             db, solicitud.sena_esperada, solicitud.categoria_id, reconocedor,
             keypoints_secuencia=keypoints_secuencia
         )
-        logger.info(f"Tipo inicial (hint): {tipo_sena_inicial}")
 
-        sena_detectada, confianza, detalles = reconocedor.predecir_adaptativo(keypoints_secuencia, tipo_sena_inicial)
+        tensor = reconocedor._tensor_desde_resultado(resultado_secuencia)
+        sena_detectada, confianza, detalles = reconocedor.predecir(
+            tensor, tipo_sena_inicial, solicitud.sena_esperada
+        )
+
+        if not sena_detectada or sena_detectada == "desconocido":
+            return _respuesta_fallida(
+                detalles.get("error") or "No se pudo reconocer la seña",
+                solicitud.categoria_id, frames_exitosos
+            )
+
         tipo_sena = detalles.get("tipo_sena", tipo_sena_inicial)
-
         confianza_validada = max(0.0, min(1.0, confianza))
         processing_time = time.time() - start_time
         evaluacion = _evaluar_calidad(confianza_validada, sena_detectada)
@@ -133,7 +215,8 @@ async def reconocer_secuencia_video(
             "num_frames_procesados": frames_exitosos,
             "num_frames_usados_prediccion": detalles.get("num_frames_usado", reconocedor.num_frames),
             "tiempo_procesamiento_ms": round(processing_time * 1000, 2),
-            "fps": round(frames_exitosos / processing_time, 2) if processing_time > 0 else 0,
+            "fps": round(num_frames_recibidos / processing_time, 2) if processing_time > 0 else 0,
+            "fuente_keypoints": "cliente" if usar_landmarks else "servidor",
             "alternativas": alternativas_filtradas,
             "modelo_usado": {
                 "modelo_id": modelo_id,
@@ -145,29 +228,22 @@ async def reconocer_secuencia_video(
         }
 
         logger.info(
-            f"Reconocimiento [Cat:{solicitud.categoria_id}]: {sena_detectada} "
-            f"({confianza_validada * 100:.1f}%) - Modo: {tipo_sena} (inicial: {tipo_sena_inicial})"
+            f"Reconocimiento [Cat:{solicitud.categoria_id}] "
+            f"[keypoints={resultado['fuente_keypoints']}]: {sena_detectada} "
+            f"({confianza_validada * 100:.1f}%) - Modo: {tipo_sena}"
         )
 
         return {"exito": True, "mensaje": "Reconocimiento completado", "datos": resultado}
 
     except Exception as e:
-        logger.error(f"Error en reconocimiento [Cat:{solicitud.categoria_id}]: {e}", exc_info=True)
-        return {
-            "exito": False,
-            "mensaje": "Error en el reconocimiento",
-            "datos": {
-                "confianza": 0.0,
-                "sena_detectada": "",
-                "num_frames_procesados": 0,
-                "categoria_id": solicitud.categoria_id
-            },
-            "errores": [f"Error interno: {e}"]
-        }
+        logger.error(f"Error en reconocimiento: {e}", exc_info=True)
+        return _respuesta_fallida(
+            "Error en el reconocimiento", solicitud.categoria_id, errores=[f"Error interno: {e}"]
+        )
 
 
 @router.get("/info-modelo")
-async def obtener_info_modelo(
+def obtener_info_modelo(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
@@ -186,7 +262,8 @@ async def obtener_info_modelo(
                 "num_frames": reconocedor.num_frames,
                 "accuracy_entrenamiento": round(reconocedor.accuracy * 100, 2),
                 "fecha_entrenamiento": modelo_db.fecha_entrenamiento.isoformat() if modelo_db and modelo_db.fecha_entrenamiento else None,
-                "tipos_senas": reconocedor.tipos_senas
+                "tipos_senas": reconocedor.tipos_senas,
+                "extractor_version": getattr(reconocedor, "extractor_version", None)
             },
             "sistema": {
                 "device": str(reconocedor.device),
@@ -202,7 +279,7 @@ async def obtener_info_modelo(
 
 
 @router.get("/estado")
-async def obtener_estado_reconocimiento(db: Session = Depends(obtener_bd)):
+def obtener_estado_reconocimiento(db: Session = Depends(obtener_bd)):
     try:
         cache_info = info_cache()
         reconocedor = None
@@ -236,7 +313,9 @@ async def obtener_estado_reconocimiento(db: Session = Depends(obtener_bd)):
 
 
 @router.post("/limpiar-cache")
-async def limpiar_cache_modelo():
+def limpiar_cache_modelo(
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar"))
+):
     try:
         mensaje = limpiar_cache()
         cerrar_mediapipe_hands()

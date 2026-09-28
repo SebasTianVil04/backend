@@ -17,35 +17,34 @@ def verificar_variables_entorno():
         'DATABASE_URL',
         'SECRET_KEY'
     ]
-    
+
     variables_opcionales = {
-        'APIPERU_TOKEN': 'API Peru no estará disponible (modo prueba)',
         'SMTP_HOST': 'El envío de emails no funcionará',
         'SMTP_USER': 'El envío de emails no funcionará'
     }
-    
+
     faltantes = []
     advertencias = []
-    
+
     # Verificar variables requeridas
     for var in variables_requeridas:
         if not os.getenv(var):
             faltantes.append(var)
-    
+
     # Verificar variables opcionales
     for var, mensaje in variables_opcionales.items():
         if not os.getenv(var):
             advertencias.append(f"    {var}: {mensaje}")
-    
+
     if faltantes:
         print("\n Faltan variables de entorno REQUERIDAS:")
         for var in faltantes:
             print(f"   - {var}")
         print("\n Copia .env.example a .env y configura las variables necesarias")
         sys.exit(1)
-    
+
     print(" Variables de entorno requeridas configuradas")
-    
+
     if advertencias:
         print("\n  Variables opcionales no configuradas:")
         for adv in advertencias:
@@ -63,76 +62,95 @@ def crear_directorios():
         "modelo_ia",
         "modelo_ia/datos_entrenamiento"
     ]
-    
+
     for dir_path in directorios:
         Path(dir_path).mkdir(parents=True, exist_ok=True)
-    
+
     print(" Directorios creados/verificados")
 
 
 def verificar_dependencias():
-    """Verificar que las dependencias críticas estén instaladas"""
+    """Verificar que las dependencias críticas estén instaladas.
+
+    Solo fastapi y sqlalchemy son estrictamente necesarias para levantar
+    la API. torch/cv2/mediapipe/numpy son necesarias para las funciones
+    de ML/visión, pero su ausencia NO debe impedir que el servidor arranque
+    (de lo contrario, /docs sale "vacío" porque el proceso muere aquí antes
+    de registrar las rutas).
+    """
     dependencias_criticas = {
         'fastapi': 'FastAPI',
         'sqlalchemy': 'SQLAlchemy',
+    }
+
+    dependencias_opcionales = {
         'torch': 'PyTorch',
         'cv2': 'OpenCV',
         'mediapipe': 'MediaPipe',
         'numpy': 'NumPy'
     }
-    
+
     faltantes = []
-    
     for modulo, nombre in dependencias_criticas.items():
         try:
             __import__(modulo)
         except ImportError:
             faltantes.append(nombre)
-    
+
     if faltantes:
         print("\n Faltan dependencias críticas:")
         for dep in faltantes:
             print(f"   - {dep}")
         print("\n Ejecuta: pip install -r requirements.txt")
         sys.exit(1)
-    
+
     print(" Dependencias críticas verificadas")
-    
-    # Mostrar versiones de ML
+
+    faltantes_opcionales = []
+    for modulo, nombre in dependencias_opcionales.items():
+        try:
+            __import__(modulo)
+        except ImportError:
+            faltantes_opcionales.append(nombre)
+
+    if faltantes_opcionales:
+        print("\n  Dependencias opcionales no instaladas (las funciones de ML/visión no estarán disponibles):")
+        for dep in faltantes_opcionales:
+            print(f"   - {dep}")
+        print("   Si las necesitas: pip install -r requirements.txt\n")
+
+    # Mostrar versiones de ML si están disponibles
     try:
         import torch
         print(f"   • PyTorch: {torch.__version__}")
-    except:
+    except ImportError:
         pass
-    
+
     try:
         import mediapipe as mp
         print(f"   • MediaPipe: {mp.__version__}")
-    except:
+    except ImportError:
         pass
-
-
 
 
 def mostrar_info_servidor(host, port, debug):
     """Mostrar información del servidor"""
 
     display_host = "localhost" if host == "0.0.0.0" else host
-    
+
     print("                     SERVIDOR INICIADO")
 
-    
     print(" URLs de acceso:")
     print(f"   • API Principal:    http://{display_host}:{port}")
     print(f"   • Documentación:    http://{display_host}:{port}/docs")
     print(f"   • ReDoc:            http://{display_host}:{port}/redoc")
     print(f"   • Health Check:     http://{display_host}:{port}/health")
-    
+
     if host == "0.0.0.0":
         print(f"\n También disponible en:")
         print(f"   • http://127.0.0.1:{port}")
         print(f"   • http://127.0.0.1:{port}/docs")
-    
+
     print(f"\n Modo: {'DEBUG (auto-reload)' if debug else 'PRODUCCIÓN'}")
     print("\n Presiona CTRL+C para detener el servidor")
 
@@ -140,27 +158,25 @@ def mostrar_info_servidor(host, port, debug):
 def main():
     """Función principal"""
     try:
-
-        
         # Verificaciones previas
         print(" Verificando configuración...\n")
         verificar_variables_entorno()
         crear_directorios()
         verificar_dependencias()
-        
+
         # Importar configuración
         from app.utilidades.configuracion import configuracion
-        
+
         # Mostrar información del servidor
         mostrar_info_servidor(
             configuracion.host,
             configuracion.port,
             configuracion.debug
         )
-        
+
         # Iniciar servidor
         import uvicorn
-        
+
         uvicorn.run(
             "app.main:app",
             host=configuracion.host,
@@ -168,12 +184,12 @@ def main():
             reload=configuracion.debug,
             log_level="info"
         )
-        
+
     except ImportError as e:
         print(f"\nError al importar módulos: {e}")
         print("Ejecuta: pip install -r requirements.txt")
         sys.exit(1)
-        
+
     except Exception as e:
         print(f"\n Error al ejecutar la aplicación: {e}")
         import traceback

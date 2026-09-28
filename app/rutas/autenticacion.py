@@ -1,8 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
-from datetime import timedelta, date, datetime
-from typing import Optional
-from ..utilidades.validaciones import validar_telefono_unico
+from datetime import timedelta
 
 from ..utilidades.base_datos import obtener_bd
 from ..utilidades.seguridad import (
@@ -20,17 +18,30 @@ from ..esquemas.usuario_schemas import (
     UsuarioLogin,
     TokenRespuesta,
     UsuarioRespuesta,
-    CambiarPassword,
+    CambiarPasswordRequest,
     SolicitudRecuperacion,
     ConfirmarRecuperacion,
     RespuestaRecuperacion,
     VerificarEmailRequest,
     VerificarEmailResponse
 )
-from ..servicios.api_peru import servicio_api_peru
 from ..servicios.email_service import servicio_email
 
 router = APIRouter(prefix="/auth", tags=["Autenticación"])
+
+
+def _construir_usuario_respuesta(usuario: Usuario) -> dict:
+    return {
+        "id": usuario.id,
+        "nombre_usuario": usuario.nombre_usuario,
+        "email": usuario.email,
+        "rol": usuario.rol,
+        "permisos": usuario.permisos,
+        "activo": usuario.activo,
+        "verificado": usuario.verificado,
+        "fecha_creacion": usuario.fecha_creacion,
+    }
+
 
 @router.post("/registro", response_model=TokenRespuesta)
 async def registrar_usuario(
@@ -49,49 +60,14 @@ async def registrar_usuario(
             detail="El email ya está registrado"
         )
 
-    nombres = datos_usuario.nombres
-    apellido_paterno = datos_usuario.apellido_paterno
-    apellido_materno = datos_usuario.apellido_materno
+    nombre_usuario_existente = bd.query(Usuario).filter(
+        Usuario.nombre_usuario == datos_usuario.nombre_usuario
+    ).first()
 
-    if datos_usuario.tipo_usuario == "peruano_mayor":
-        if datos_usuario.dni:
-            dni_existe = bd.query(Usuario).filter(
-                Usuario.dni == datos_usuario.dni
-            ).first()
-
-            if dni_existe:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="El DNI ya está registrado"
-                )
-
-        if datos_usuario.dni:
-            try:
-                datos_reniec = await servicio_api_peru.consultar_dni(datos_usuario.dni)
-                nombres = datos_reniec.nombres
-                apellido_paterno = datos_reniec.apellido_paterno
-                apellido_materno = datos_reniec.apellido_materno
-            except Exception as e:
-                pass
-
-    elif datos_usuario.tipo_usuario == "extranjero":
-        if datos_usuario.pasaporte:
-            pasaporte_existe = bd.query(Usuario).filter(
-                Usuario.pasaporte == datos_usuario.pasaporte
-            ).first()
-
-            if pasaporte_existe:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="El pasaporte ya está registrado"
-                )
-
-    if datos_usuario.telefono:
-        validar_telefono_unico(
-            bd,
-            datos_usuario.telefono,
-            usuario_id=None,
-            permitir_duplicados=False
+    if nombre_usuario_existente:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Ese nombre de usuario ya está en uso"
         )
 
     try:
@@ -106,17 +82,9 @@ async def registrar_usuario(
             )
 
         nuevo_usuario = Usuario(
-            tipo_usuario=datos_usuario.tipo_usuario,
+            nombre_usuario=datos_usuario.nombre_usuario,
             email=email_normalizado,
             password_hash=obtener_hash_password(datos_usuario.password),
-            dni=datos_usuario.dni if datos_usuario.tipo_usuario != "extranjero" else None,
-            pasaporte=datos_usuario.pasaporte if datos_usuario.tipo_usuario == "extranjero" else None,
-            nombres=nombres,
-            apellido_paterno=apellido_paterno,
-            apellido_materno=apellido_materno,
-            telefono=datos_usuario.telefono,
-            direccion=datos_usuario.direccion,
-            fecha_nacimiento=datos_usuario.fecha_nacimiento,
             rol_id=rol_por_defecto.id,
             activo=True,
             verificado=True
@@ -149,35 +117,10 @@ async def registrar_usuario(
         expires_delta=access_token_expires
     )
 
-    apellidos_completos = f"{nuevo_usuario.apellido_paterno} {nuevo_usuario.apellido_materno}".strip()
-
-    usuario_respuesta = {
-        "id": nuevo_usuario.id,
-        "tipo_usuario": nuevo_usuario.tipo_usuario,
-        "email": nuevo_usuario.email,
-        "dni": nuevo_usuario.dni,
-        "pasaporte": nuevo_usuario.pasaporte,
-        "nombres": nuevo_usuario.nombres,
-        "apellido_paterno": nuevo_usuario.apellido_paterno,
-        "apellido_materno": nuevo_usuario.apellido_materno,
-        "apellidos": apellidos_completos,
-        "telefono": nuevo_usuario.telefono,
-        "fecha_nacimiento": nuevo_usuario.fecha_nacimiento.isoformat() if nuevo_usuario.fecha_nacimiento else None,
-        "direccion": nuevo_usuario.direccion,
-        "rol": nuevo_usuario.rol,
-        "permisos": nuevo_usuario.permisos,
-        "activo": nuevo_usuario.activo,
-        "es_admin": nuevo_usuario.es_admin,
-        "verificado": nuevo_usuario.verificado,
-        "fecha_registro": nuevo_usuario.fecha_creacion.isoformat() if nuevo_usuario.fecha_creacion else None,
-        "fecha_creacion": nuevo_usuario.fecha_creacion,
-        "nombre_completo": nuevo_usuario.nombre_completo
-    }
-
     return TokenRespuesta(
         access_token=access_token,
         token_type="bearer",
-        usuario=UsuarioRespuesta(**usuario_respuesta)
+        usuario=UsuarioRespuesta(**_construir_usuario_respuesta(nuevo_usuario))
     )
 
 
@@ -216,35 +159,10 @@ async def login_usuario(
         expires_delta=access_token_expires
     )
 
-    apellidos_completos = f"{usuario_db.apellido_paterno} {usuario_db.apellido_materno}".strip()
-
-    usuario_respuesta = {
-        "id": usuario_db.id,
-        "tipo_usuario": usuario_db.tipo_usuario,
-        "email": usuario_db.email,
-        "dni": usuario_db.dni,
-        "pasaporte": usuario_db.pasaporte,
-        "nombres": usuario_db.nombres,
-        "apellido_paterno": usuario_db.apellido_paterno,
-        "apellido_materno": usuario_db.apellido_materno,
-        "apellidos": apellidos_completos,
-        "telefono": usuario_db.telefono,
-        "fecha_nacimiento": usuario_db.fecha_nacimiento.isoformat() if usuario_db.fecha_nacimiento else None,
-        "direccion": usuario_db.direccion,
-        "rol": usuario_db.rol,
-        "permisos": usuario_db.permisos,
-        "activo": usuario_db.activo,
-        "es_admin": usuario_db.es_admin,
-        "verificado": usuario_db.verificado,
-        "fecha_registro": usuario_db.fecha_creacion.isoformat() if usuario_db.fecha_creacion else None,
-        "fecha_creacion": usuario_db.fecha_creacion,
-        "nombre_completo": usuario_db.nombre_completo
-    }
-
     return TokenRespuesta(
         access_token=access_token,
         token_type="bearer",
-        usuario=UsuarioRespuesta(**usuario_respuesta)
+        usuario=UsuarioRespuesta(**_construir_usuario_respuesta(usuario_db))
     )
 
 
@@ -254,13 +172,13 @@ async def logout_usuario(
 ):
     return {
         "mensaje": "Sesión cerrada exitosamente",
-        "usuario": usuario_actual.nombre_completo
+        "usuario": usuario_actual.nombre_usuario
     }
 
 
 @router.put("/cambiar-password")
 async def cambiar_password(
-    datos: CambiarPassword,
+    datos: CambiarPasswordRequest,
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     bd: Session = Depends(obtener_bd)
 ):
@@ -282,7 +200,7 @@ async def cambiar_password(
 
         return {
             "mensaje": "Contraseña actualizada exitosamente",
-            "usuario": usuario_actual.nombre_completo
+            "usuario": usuario_actual.nombre_usuario
         }
     except Exception as e:
         bd.rollback()
@@ -336,7 +254,7 @@ async def solicitar_recuperacion_password(
     background_tasks.add_task(
         servicio_email.enviar_recuperacion_password,
         usuario_db.email,
-        usuario_db.nombre_completo,
+        usuario_db.nombre_usuario,
         nuevo_token.token
     )
 
@@ -398,7 +316,7 @@ async def confirmar_recuperacion_password(
         background_tasks.add_task(
             servicio_email.enviar_notificacion_cambio_password,
             usuario_db.email,
-            usuario_db.nombre_completo
+            usuario_db.nombre_usuario
         )
 
         return RespuestaRecuperacion(
@@ -414,6 +332,7 @@ async def confirmar_recuperacion_password(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error inesperado: {str(e)}"
         )
+
 
 @router.post("/verificar-email", response_model=VerificarEmailResponse)
 async def verificar_email_existe(

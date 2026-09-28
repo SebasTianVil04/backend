@@ -23,6 +23,10 @@ from ..modelos.dataset import CategoriaDataset, VideoDataset
 from ..modelos.categoria import Categoria
 from ..modelos.tipo_categoria import TipoCategoria
 from ..esquemas.respuestas import RespuestaAPI, RespuestaLista
+import hashlib
+from datetime import timedelta
+
+VENTANA_DEDUP_SEGUNDOS = 30
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/dataset", tags=["Dataset de Entrenamiento"])
@@ -239,6 +243,38 @@ async def subir_video_dataset(
         if not categoria:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Categoría no encontrada o inactiva")
 
+        contenido = await archivo.read()
+        hash_contenido = hashlib.sha256(contenido).hexdigest()
+        await archivo.seek(0)
+
+        limite_tiempo = datetime.now(timezone.utc) - timedelta(seconds=VENTANA_DEDUP_SEGUNDOS)
+        duplicado = db.query(VideoDataset).filter(
+            VideoDataset.usuario_id == usuario_actual.id,
+            VideoDataset.categoria_id == categoria_id,
+            VideoDataset.sena == sena.strip().upper(),
+            VideoDataset.tamaño_bytes == len(contenido),
+            VideoDataset.fecha_subida >= limite_tiempo
+        ).first()
+
+        if duplicado:
+            logger.warning(
+                f"Subida duplicada detectada y bloqueada: video_id={duplicado.id}, "
+                f"usuario={usuario_actual.id}, sena={sena}"
+            )
+            return RespuestaAPI(
+                exito=True,
+                mensaje="Video ya fue subido (duplicado evitado)",
+                datos={
+                    "id": duplicado.id,
+                    "sena": duplicado.sena,
+                    "categoria_id": duplicado.categoria_id,
+                    "ruta": duplicado.ruta_video,
+                    "duracion": duplicado.duracion_segundos,
+                    "frames_extraidos": duplicado.frames_extraidos,
+                    "requiere_aprobacion": not duplicado.aprobado
+                }
+            )
+
         video = await dataset_service.subir_video_dataset(
             db=db, archivo=archivo, categoria_id=categoria_id, sena=sena, usuario_id=usuario_actual.id
         )
@@ -287,7 +323,7 @@ async def listar_videos_pendientes(
             "duracion": v.duracion_segundos,
             "frames_extraidos": v.frames_extraidos,
             "fecha_subida": v.fecha_subida.isoformat() if v.fecha_subida else None,
-            "subido_por": v.usuario.nombre_completo if v.usuario else "Usuario desconocido"
+            "subido_por": v.usuario.nombre_usuario if v.usuario else "Usuario desconocido"
         } for v in videos]
 
         return RespuestaLista(
@@ -561,7 +597,7 @@ async def listar_todos_los_videos(
                 "fecha_aprobado": video.fecha_aprobado.isoformat() if video.fecha_aprobado else None,
                 "fecha_rechazado": video.fecha_rechazado.isoformat() if video.fecha_rechazado else None,
                 "usuario_id": video.usuario_id,
-                "subido_por": video.usuario.nombre_completo if video.usuario else None,
+                "subido_por": video.usuario.nombre_usuario if video.usuario else None,
                 "notas": video.notas
             })
 
@@ -721,6 +757,157 @@ async def obtener_progreso_entrenamiento_endpoint(
     except Exception as e:
         logger.error(f"Error obteniendo progreso de {nombre_modelo}: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error obteniendo progreso: {e}")
+
+
+@router.get("/modelos", response_model=RespuestaLista)
+async def listar_modelos(
+    db: Session = Depends(obtener_bd),
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.ver"))
+):
+    try:
+        modelos = db.query(ModeloIA).order_by(
+            ModeloIA.activo.desc(),
+            ModeloIA.fecha_entrenamiento.desc().nullslast(),
+            ModeloIA.id.desc()
+        ).all()
+
+        data = [{
+            "id": m.id,
+            "nombre": m.nombre,
+            "descripcion": m.descripcion,
+            "num_clases": m.num_clases,
+            "clases": json.loads(m.clases_json) if m.clases_json else [],
+            "accuracy": float(m.accuracy) if m.accuracy else 0.0,
+            "activo": m.activo,
+            "arquitectura": m.arquitectura,
+            "version": m.version,
+            "ruta_archivo": m.ruta_archivo,
+            "existe_archivo": bool(m.ruta_archivo and os.path.exists(m.ruta_archivo)),
+            "epocas_entrenamiento": m.epocas_entrenamiento,
+            "total_imagenes": m.total_imagenes,
+            "fecha_entrenamiento": m.fecha_entrenamiento.isoformat() if m.fecha_entrenamiento else None,
+            "fecha_creacion": m.fecha_creacion.isoformat() if getattr(m, 'fecha_creacion', None) else None
+        } for m in modelos]
+
+        return RespuestaLista(
+            exito=True,
+            mensaje=f"Se encontraron {len(data)} modelos",
+            datos=data,
+            total=len(data),
+            pagina=1,
+            por_pagina=len(data)
+        )
+    except Exception as e:
+        logger.error(f"Error listando modelos: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error listando modelos: {e}")
+
+
+@router.post("/sincronizar-modelos", response_model=RespuestaAPI)
+async def sincronizar_modelos_desde_disco(
+    db: Session = Depends(obtener_bd),
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar"))
+):
+    try:
+        modelos_dir = PathLib("modelos_entrenados")
+        if not modelos_dir.exists():
+            return RespuestaAPI(exito=True, mensaje="No hay carpeta modelos_entrenados", datos={"registrados": []})
+
+        archivos = sorted(
+            modelos_dir.glob("*.pth"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True
+        )
+
+        rutas_en_bd = {
+            str(PathLib(r[0]).resolve())
+            for r in db.query(ModeloIA.ruta_archivo).filter(ModeloIA.ruta_archivo.isnot(None)).all()
+        }
+
+        registrados = []
+        for archivo in archivos:
+            ruta_abs = str(archivo.resolve())
+            if ruta_abs in rutas_en_bd:
+                continue
+
+            try:
+                checkpoint = torch.load(ruta_abs, map_location='cpu', weights_only=False)
+                clases = checkpoint.get('clases', [])
+                if not clases:
+                    continue
+
+                nuevo = ModeloIA(
+                    nombre=archivo.stem,
+                    descripcion=f"Modelo recuperado desde disco ({archivo.name})",
+                    ruta_archivo=ruta_abs,
+                    num_clases=len(clases),
+                    clases_json=json.dumps(clases, ensure_ascii=False),
+                    accuracy=float(checkpoint.get('accuracy', 0.0)),
+                    activo=False,
+                    fecha_entrenamiento=datetime.now(),
+                    epocas_entrenamiento=0,
+                    total_imagenes=0,
+                    arquitectura=checkpoint.get('arquitectura', 'ModeloAdaptativoSenas_LSTM'),
+                    version=checkpoint.get('version', '8.0'),
+                )
+                db.add(nuevo)
+                db.commit()
+                db.refresh(nuevo)
+                registrados.append({"id": nuevo.id, "nombre": nuevo.nombre, "accuracy": nuevo.accuracy})
+            except Exception as e:
+                db.rollback()
+                logger.warning(f"No se pudo registrar {archivo.name}: {e}")
+
+        return RespuestaAPI(
+            exito=True,
+            mensaje=f"Se registraron {len(registrados)} modelos desde disco",
+            datos={"registrados": registrados}
+        )
+    except Exception as e:
+        logger.error(f"Error sincronizando modelos: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error sincronizando: {e}")
+
+
+@router.post("/modelos/{modelo_id}/activar", response_model=RespuestaAPI)
+async def activar_modelo(
+    modelo_id: int,
+    db: Session = Depends(obtener_bd),
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar"))
+):
+    try:
+        modelo = db.query(ModeloIA).filter(ModeloIA.id == modelo_id).first()
+        if not modelo:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Modelo no encontrado")
+
+        if not modelo.ruta_archivo or not os.path.exists(modelo.ruta_archivo):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El archivo del modelo no existe: {modelo.ruta_archivo}"
+            )
+
+        db.query(ModeloIA).filter(ModeloIA.id != modelo_id).update(
+            {"activo": False}, synchronize_session=False
+        )
+        modelo.activo = True
+        db.commit()
+        db.refresh(modelo)
+
+        try:
+            from app.servicios.gestor_reconocimiento import limpiar_cache
+            limpiar_cache()
+        except Exception as e:
+            logger.warning(f"No se pudo limpiar cache tras activar: {e}")
+
+        return RespuestaAPI(
+            exito=True,
+            mensaje=f"Modelo '{modelo.nombre}' activado",
+            datos={"id": modelo.id, "nombre": modelo.nombre, "activo": True}
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error activando modelo: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error activando modelo: {e}")
 
 
 def _detectar_clases_y_metricas(estado, clases_manual: Optional[str]):

@@ -1,4 +1,3 @@
-from .api_peru import ServicioApiPeru, servicio_api_peru
 from .archivos import ArchivoService, archivo_service
 from .estadisticas_servicio import EstadisticasServicio
 from .dataset_service import dataset_service

@@ -1,4 +1,5 @@
 from .usuario import Usuario
+from .rol import Rol
 from .categoria import Categoria
 from .leccion import Leccion
 from .clase import Clase
@@ -8,11 +9,12 @@ from .examen import Examen, PreguntaExamen, ResultadoExamen
 from .entrenamiento import Entrenamiento, ModeloIA
 from .token_recuperacion import TokenRecuperacion
 from .estudio import SesionEstudio
-from .dataset import CategoriaDataset, VideoDataset
+from .dataset import CategoriaDataset, VideoDataset, CalibracionUsuario
 from .tipo_categoria import TipoCategoria
 
 __all__ = [
     "Usuario",
+    "Rol",
     "Categoria",
     "Leccion",
     "Clase",
@@ -25,7 +27,9 @@ __all__ = [
     "Entrenamiento",
     "ModeloIA",
     "TokenRecuperacion",
+    "SesionEstudio",
     "CategoriaDataset",
     "VideoDataset",
+    "CalibracionUsuario",
     "TipoCategoria",
 ]

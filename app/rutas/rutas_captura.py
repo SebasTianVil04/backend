@@ -67,11 +67,12 @@ async def capturar_video_archivo(
         etiqueta = "Aprobado" if video.aprobado else "Pendiente de revisión"
 
         logger.info(
-            "Video procesado: id=%s frames=%s aprobado=%s usuario=%s",
+            "Video procesado: id=%s frames=%s aprobado=%s usuario=%s mano_detectada=%s",
             video.id,
             video.frames_extraidos,
             video.aprobado,
             usuario_actual.id,
+            video.mano_detectada,
         )
 
         return RespuestaAPI(
@@ -89,6 +90,7 @@ async def capturar_video_archivo(
                 "aprobado": video.aprobado,
                 "fps": video.fps,
                 "estado": estado,
+                "mano_detectada": video.mano_detectada,
             },
         )
 

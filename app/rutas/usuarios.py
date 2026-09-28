@@ -6,7 +6,7 @@ from sqlalchemy import and_, func
 from ..utilidades.base_datos import obtener_bd
 from ..utilidades.seguridad import obtener_usuario_actual, obtener_hash_password, verificar_password
 from ..modelos.usuario import Usuario
-from ..modelos.progreso import ProgresoClase, ProgresoLeccion 
+from ..modelos.progreso import ProgresoClase, ProgresoLeccion
 from ..modelos.leccion import Leccion
 from ..esquemas.usuario_schemas import (
     UsuarioRespuesta,
@@ -14,71 +14,21 @@ from ..esquemas.usuario_schemas import (
     CambiarPasswordRequest
 )
 from ..esquemas.respuesta_schemas import (
-    RespuestaAPI, 
+    RespuestaAPI,
     RespuestaProgresoUsuario,
     RespuestaLista
 )
 
-from ..utilidades.validaciones import (
-    validar_telefono_unico,
-    validar_longitud_telefono_por_pais
-)
-
-from ..servicios.api_peru import servicio_api_peru
-
 
 router = APIRouter(prefix="/usuarios", tags=["Usuarios"])
+
 
 @router.get("/perfil", response_model=UsuarioRespuesta)
 async def obtener_perfil(
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    apellidos_completos = f"{usuario_actual.apellido_paterno or ''} {usuario_actual.apellido_materno or ''}".strip()
+    return usuario_actual
 
-    perfil = {
-        "id": usuario_actual.id,
-        "tipo_usuario": usuario_actual.tipo_usuario,
-        "email": usuario_actual.email,
-        "dni": usuario_actual.dni,
-        "pasaporte": usuario_actual.pasaporte,
-        "nombres": usuario_actual.nombres,
-        "apellido_paterno": usuario_actual.apellido_paterno,
-        "apellido_materno": usuario_actual.apellido_materno,
-        "apellidos": apellidos_completos,
-        "telefono": usuario_actual.telefono,
-        "fecha_nacimiento": usuario_actual.fecha_nacimiento.isoformat() if usuario_actual.fecha_nacimiento else None,
-        "direccion": usuario_actual.direccion,
-        "rol": usuario_actual.rol,
-        "permisos": usuario_actual.permisos,
-        "activo": usuario_actual.activo,
-        "es_admin": usuario_actual.es_admin,
-        "verificado": usuario_actual.verificado,
-        "fecha_registro": usuario_actual.fecha_creacion.isoformat() if usuario_actual.fecha_creacion else None,
-        "fecha_creacion": usuario_actual.fecha_creacion,
-        "nombre_completo": usuario_actual.nombre_completo
-    }
-
-    return perfil
-
-@router.post("/verificar-dni")
-async def verificar_dni(dni: str):
-    if not dni or len(dni) != 8 or not dni.isdigit():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="DNI debe tener exactamente 8 dígitos"
-        )
-
-    try:
-        datos = await servicio_api_peru.consultar_dni(dni)
-        return {
-            "valido": True,
-            "datos": datos.dict()
-        }
-    except HTTPException as e:
-        return {
-            "valido": False,
-            "error": e.detail
-        }
 
 @router.put("/perfil", response_model=RespuestaAPI)
 async def actualizar_mi_perfil(
@@ -89,83 +39,21 @@ async def actualizar_mi_perfil(
     try:
         campos_actualizados = []
 
-        if datos_actualizacion.telefono is not None:
-            if datos_actualizacion.telefono:
-                if not datos_actualizacion.telefono.startswith('+'):
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="El teléfono debe incluir el código de país (ej: +51987654321)"
-                    )
-
-                es_valido, mensaje_error = validar_longitud_telefono_por_pais(datos_actualizacion.telefono)
-                if not es_valido:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=mensaje_error
-                    )
-
-                validar_telefono_unico(
-                    db, 
-                    datos_actualizacion.telefono, 
-                    usuario_id=usuario_actual.id,
-                    permitir_duplicados=False
-                )
-
-            usuario_actual.telefono = datos_actualizacion.telefono
-            campos_actualizados.append("telefono")
-
-        if datos_actualizacion.direccion is not None:
-            usuario_actual.direccion = datos_actualizacion.direccion
-            campos_actualizados.append("direccion")
-
-        if datos_actualizacion.fecha_nacimiento is not None:
-            from datetime import date
-            hoy = date.today()
-            fecha_nac = datos_actualizacion.fecha_nacimiento
-            edad = hoy.year - fecha_nac.year
-
-            if hoy.month < fecha_nac.month or (hoy.month == fecha_nac.month and hoy.day < fecha_nac.day):
-                edad -= 1
-
-            if usuario_actual.tipo_usuario == 'peruano_menor' and edad >= 18:
+        if datos_actualizacion.nombre_usuario is not None:
+            existente = db.query(Usuario).filter(
+                Usuario.nombre_usuario == datos_actualizacion.nombre_usuario,
+                Usuario.id != usuario_actual.id
+            ).first()
+            if existente:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="La fecha de nacimiento no coincide con el tipo de usuario (menor de edad)"
+                    detail="Ese nombre de usuario ya está en uso"
                 )
-            elif usuario_actual.tipo_usuario in ['peruano_mayor', 'extranjero'] and edad < 18:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="La fecha de nacimiento no coincide con el tipo de usuario (mayor de edad)"
-                )
-
-            usuario_actual.fecha_nacimiento = datos_actualizacion.fecha_nacimiento
-            campos_actualizados.append("fecha_nacimiento")
+            usuario_actual.nombre_usuario = datos_actualizacion.nombre_usuario
+            campos_actualizados.append("nombre_usuario")
 
         db.commit()
         db.refresh(usuario_actual)
-
-        apellidos_completos = f"{usuario_actual.apellido_paterno or ''} {usuario_actual.apellido_materno or ''}".strip()
-
-        usuario_actualizado = {
-            "id": usuario_actual.id,
-            "tipo_usuario": usuario_actual.tipo_usuario,
-            "email": usuario_actual.email,
-            "dni": usuario_actual.dni,
-            "pasaporte": usuario_actual.pasaporte,
-            "nombres": usuario_actual.nombres,
-            "apellido_paterno": usuario_actual.apellido_paterno,
-            "apellido_materno": usuario_actual.apellido_materno,
-            "apellidos": apellidos_completos,
-            "telefono": usuario_actual.telefono,
-            "fecha_nacimiento": usuario_actual.fecha_nacimiento.isoformat() if usuario_actual.fecha_nacimiento else None,
-            "direccion": usuario_actual.direccion,
-            "rol": usuario_actual.rol.codigo,
-            "activo": usuario_actual.activo,
-            "es_admin": usuario_actual.es_admin,
-            "verificado": usuario_actual.verificado,
-            "fecha_creacion": usuario_actual.fecha_creacion,
-            "nombre_completo": usuario_actual.nombre_completo
-        }
 
         mensaje = "Perfil actualizado exitosamente"
         if campos_actualizados:
@@ -174,20 +62,18 @@ async def actualizar_mi_perfil(
         return RespuestaAPI(
             exito=True,
             mensaje=mensaje,
-            datos=usuario_actualizado
+            datos=UsuarioRespuesta.model_validate(usuario_actual).model_dump()
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        print("Error detalle:", e)
-        import traceback
-        traceback.print_exc()
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al actualizar perfil: {str(e)}"
         )
+
 
 @router.put("/cambiar-password", response_model=RespuestaAPI)
 async def cambiar_password(
@@ -225,6 +111,7 @@ async def cambiar_password(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al cambiar contraseña: {str(e)}"
         )
+
 
 @router.get("/mi-progreso", response_model=RespuestaProgresoUsuario)
 async def obtener_mi_progreso(
@@ -296,6 +183,7 @@ async def obtener_mi_progreso(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al obtener progreso: {str(e)}"
         )
+
 
 @router.get("/mis-lecciones", response_model=RespuestaLista)
 async def obtener_mis_lecciones(

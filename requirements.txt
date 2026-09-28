@@ -1,4 +1,15 @@
-﻿# Web Framework
+﻿# ============================================================
+# IMPORTANTE: instala PyTorch con CUDA 12.1 ANTES de este archivo,
+# con este comando por separado (no va en este requirements.txt
+# porque necesita --extra-index-url):
+#
+#   pip install torch==2.1.2+cu121 torchvision==0.16.2+cu121 --extra-index-url https://download.pytorch.org/whl/cu121
+#
+# Luego instala el resto con:
+#   pip install -r requirements.txt
+# ============================================================
+
+# Web Framework
 fastapi==0.104.1
 uvicorn==0.24.0
 
@@ -12,7 +23,7 @@ pydantic==2.5.0
 pydantic-settings==2.0.3
 email-validator==2.1.0
 
-# Security 
+# Security
 python-jose[cryptography]==3.3.0
 passlib==1.7.4
 bcrypt==4.0.1
@@ -23,25 +34,26 @@ httpx==0.25.2
 python-dotenv==1.0.0
 aiofiles==23.2.1
 
-# NumPy - versión específica para Python 3.8
+# NumPy - ya soporta Python 3.11 sin cambios
 numpy==1.24.3
 
-# Pillow - versión ESPECÍFICA con wheels para Python 3.8
-Pillow==8.4.0
+# Pillow - ACTUALIZADO: 8.4.0 no tiene wheels para Python 3.9+
+Pillow==10.4.0
 
-# Protobuf - CRÍTICO: versión compatible con mediapipe
-protobuf==3.20.3
+# Protobuf - SIN FIJAR: dejamos que pip resuelva la versión
+# compatible con la nueva versión de mediapipe automáticamente
+protobuf
 
-# Computer Vision - versión compatible
+# Computer Vision
 opencv-python==4.8.0.76
 
-# Machine Learning - versión estable
+# Machine Learning
 scikit-learn==1.3.0
 scipy==1.10.1
 pandas==2.0.3
 
-# MediaPipe - versión compatible con Python 3.8
-mediapipe==0.10.7
+# MediaPipe - ACTUALIZADO: 0.10.7 estaba atado a Python 3.8-3.10
+mediapipe==0.10.14
 
 # Email
 emails==0.6

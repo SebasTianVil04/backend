@@ -1,6 +1,6 @@
 # Entornos virtuales
-.venv/
-venv/
+.venv311/
+venv311/
 env/
 
 # Archivos de caché de Python

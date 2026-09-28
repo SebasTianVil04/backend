@@ -1,64 +1,52 @@
 from pydantic import BaseModel, EmailStr, field_validator
-from typing import Optional, Tuple, List, Literal
-from datetime import datetime, date
+from typing import Optional, Tuple, List
+from datetime import datetime
 import re
 
 MAX_PASSWORD_LENGTH = 72
+MIN_USERNAME_LENGTH = 3
+MAX_USERNAME_LENGTH = 30
+
+
+def _validar_password(v: str) -> str:
+    if len(v) > MAX_PASSWORD_LENGTH:
+        raise ValueError(f'La contraseña no puede exceder {MAX_PASSWORD_LENGTH} caracteres')
+    if len(v) < 8:
+        raise ValueError('La contraseña debe tener al menos 8 caracteres')
+    if not re.search(r'[A-Z]', v):
+        raise ValueError('Debe contener al menos una mayúscula')
+    if not re.search(r'[a-z]', v):
+        raise ValueError('Debe contener al menos una minúscula')
+    if not re.search(r'\d', v):
+        raise ValueError('Debe contener al menos un número')
+    return v
+
+
+def _validar_nombre_usuario(v: str) -> str:
+    v = v.strip()
+    if len(v) < MIN_USERNAME_LENGTH or len(v) > MAX_USERNAME_LENGTH:
+        raise ValueError(
+            f'El nombre de usuario debe tener entre {MIN_USERNAME_LENGTH} y {MAX_USERNAME_LENGTH} caracteres'
+        )
+    if not re.match(r'^[a-zA-Z0-9_]+$', v):
+        raise ValueError('El nombre de usuario solo puede contener letras, números y guion bajo (_)')
+    return v
 
 
 class UsuarioRegistro(BaseModel):
-    tipo_usuario: Literal["peruano_mayor", "peruano_menor", "extranjero"]
+    nombre_usuario: str
     email: EmailStr
     password: str
 
-    dni: Optional[str] = None
-    pasaporte: Optional[str] = None
-
-    nombres: str
-    apellido_paterno: str
-    apellido_materno: str
-
-    telefono: Optional[str] = None
-    direccion: Optional[str] = None
-    fecha_nacimiento: Optional[date] = None
+    @field_validator('nombre_usuario')
+    @classmethod
+    def validar_nombre_usuario(cls, v):
+        return _validar_nombre_usuario(v)
 
     @field_validator('password')
     @classmethod
     def validar_password(cls, v):
-        if len(v) > MAX_PASSWORD_LENGTH:
-            raise ValueError(f'La contraseña no puede exceder {MAX_PASSWORD_LENGTH} caracteres')
-
-        if len(v) < 8:
-            raise ValueError('La contraseña debe tener al menos 8 caracteres')
-        if not re.search(r'[A-Z]', v):
-            raise ValueError('Debe contener al menos una mayúscula')
-        if not re.search(r'[a-z]', v):
-            raise ValueError('Debe contener al menos una minúscula')
-        if not re.search(r'\d', v):
-            raise ValueError('Debe contener al menos un número')
-        return v
-
-    @field_validator('dni')
-    @classmethod
-    def validar_dni(cls, v, info):
-        if info.data.get('tipo_usuario') == 'peruano_mayor':
-            if not v:
-                raise ValueError('DNI es requerido para peruanos mayores de edad')
-            if not v.isdigit() or len(v) != 8:
-                raise ValueError('DNI debe tener 8 dígitos')
-        return v
-
-    @field_validator('pasaporte')
-    @classmethod
-    def validar_pasaporte(cls, v, info):
-        if info.data.get('tipo_usuario') == 'extranjero':
-            if not v:
-                raise ValueError('Pasaporte es requerido para extranjeros')
-            if len(v) < 6 or len(v) > 20:
-                raise ValueError('Pasaporte debe tener entre 6 y 20 caracteres')
-            if not v.replace('-', '').replace(' ', '').isalnum():
-                raise ValueError('Pasaporte debe contener solo letras y números')
-        return v
+        return _validar_password(v)
 
 
 class UsuarioLogin(BaseModel):
@@ -77,106 +65,35 @@ class RolResumen(BaseModel):
 
 class UsuarioRespuesta(BaseModel):
     id: int
-    tipo_usuario: Literal['peruano_mayor', 'peruano_menor', 'extranjero']
+    nombre_usuario: str
     email: str
-    dni: Optional[str] = None
-    pasaporte: Optional[str] = None
-    nombres: str
-    apellido_paterno: str
-    apellido_materno: str
-    apellidos: Optional[str] = None
-    telefono: Optional[str] = None
-    fecha_nacimiento: Optional[str] = None
-    direccion: Optional[str] = None
-    rol: RolResumen
+    rol: Optional[RolResumen] = None
     permisos: List[str] = []
     activo: bool
     verificado: bool
-    fecha_registro: Optional[str] = None
     fecha_creacion: Optional[datetime] = None
-    nombre_completo: Optional[str] = None
 
     class Config:
         from_attributes = True
 
 
 class UsuarioActualizacion(BaseModel):
-    telefono: Optional[str] = None
-    direccion: Optional[str] = None
-    fecha_nacimiento: Optional[date] = None
+    nombre_usuario: Optional[str] = None
 
-    @field_validator('telefono')
+    @field_validator('nombre_usuario')
     @classmethod
-    def validar_telefono(cls, v):
-        if v is None or v == '':
+    def validar_nombre_usuario(cls, v):
+        if v is None:
             return v
-
-        if not v.startswith('+'):
-            raise ValueError('El teléfono debe incluir código de país (ej: +51987654321)')
-
-        solo_digitos = ''.join(filter(str.isdigit, v))
-
-        if len(solo_digitos) < 9 or len(solo_digitos) > 15:
-            raise ValueError('El teléfono debe tener entre 9 y 15 dígitos')
-
-        return v
-
-    @field_validator('fecha_nacimiento', mode='before')
-    @classmethod
-    def validar_fecha_actualizacion(cls, v):
-        if v is None or v == '':
-            return None
-
-        if isinstance(v, str):
-            try:
-                if 'T' in v:
-                    fecha = datetime.fromisoformat(v.replace('Z', '+00:00')).date()
-                else:
-                    fecha = datetime.strptime(v, '%Y-%m-%d').date()
-            except ValueError:
-                raise ValueError('Formato de fecha inválido (use YYYY-MM-DD)')
-        elif isinstance(v, datetime):
-            fecha = v.date()
-        elif isinstance(v, date):
-            fecha = v
-        else:
-            return None
-
-        if fecha > date.today():
-            raise ValueError('La fecha de nacimiento no puede ser futura')
-
-        return fecha
+        return _validar_nombre_usuario(v)
 
     class Config:
         from_attributes = True
         json_schema_extra = {
             "example": {
-                "telefono": "+51987654321",
-                "direccion": "Av. Example 123, Lima",
-                "fecha_nacimiento": "2001-04-19"
+                "nombre_usuario": "sebastian_v"
             }
         }
-
-
-class CambiarPassword(BaseModel):
-    password_actual: str
-    password_nueva: str
-
-    @field_validator('password_nueva')
-    @classmethod
-    def validar_password_nueva(cls, v):
-        if len(v) > MAX_PASSWORD_LENGTH:
-            raise ValueError(f'La contraseña no puede exceder {MAX_PASSWORD_LENGTH} caracteres')
-
-        if len(v) < 8:
-            raise ValueError('La contraseña debe tener al menos 8 caracteres')
-        if not any(c.isupper() for c in v):
-            raise ValueError('La contraseña debe contener al menos una mayúscula')
-        if not any(c.islower() for c in v):
-            raise ValueError('La contraseña debe contener al menos una minúscula')
-        if not any(c.isdigit() for c in v):
-            raise ValueError('La contraseña debe contener al menos un número')
-        return v
 
 
 class CambiarPasswordRequest(BaseModel):
@@ -185,19 +102,8 @@ class CambiarPasswordRequest(BaseModel):
 
     @field_validator('password_nueva')
     @classmethod
-    def validar_password(cls, v):
-        if len(v) > MAX_PASSWORD_LENGTH:
-            raise ValueError(f'La contraseña no puede exceder {MAX_PASSWORD_LENGTH} caracteres')
-
-        if len(v) < 8:
-            raise ValueError('La contraseña debe tener al menos 8 caracteres')
-        if not any(c.isupper() for c in v):
-            raise ValueError('La contraseña debe contener al menos una mayúscula')
-        if not any(c.islower() for c in v):
-            raise ValueError('La contraseña debe contener al menos una minúscula')
-        if not any(c.isdigit() for c in v):
-            raise ValueError('La contraseña debe contener al menos un número')
-        return v
+    def validar_password_nueva(cls, v):
+        return _validar_password(v)
 
 
 class SolicitudRecuperacion(BaseModel):
@@ -263,11 +169,12 @@ class TokenRespuesta(BaseModel):
 
 
 class DatosApiperu(BaseModel):
-    nombres: str
-    apellido_paterno: str
-    apellido_materno: str
-    fecha_nacimiento: Optional[date] = None
-    direccion: Optional[str] = None
+    """Obsoleto: ya no se usa (se eliminó la integración con apiperu.dev).
+    Se mantiene solo para no romper imports de módulos que aún la referencian;
+    puede eliminarse por completo una vez limpiados esos módulos."""
+    nombres: Optional[str] = None
+    apellido_paterno: Optional[str] = None
+    apellido_materno: Optional[str] = None
 
 
 def validar_fortaleza_password(password: str) -> Tuple[bool, List[str]]:
@@ -292,7 +199,7 @@ def validar_fortaleza_password(password: str) -> Tuple[bool, List[str]]:
 
 class EstadisticasUsuario(BaseModel):
     usuario_id: int
-    nombre_completo: str
+    nombre_usuario: str
     email: str
 
     total_lecciones_completadas: int = 0
@@ -316,7 +223,7 @@ class EstadisticasUsuario(BaseModel):
     examenes_aprobados: int = 0
     tasa_aprobacion: float = 0.0
 
-    fecha_registro: datetime
+    fecha_registro: Optional[datetime] = None
     ultima_actividad: Optional[datetime] = None
     ultima_leccion_completada: Optional[datetime] = None
 

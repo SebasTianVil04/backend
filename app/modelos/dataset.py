@@ -62,6 +62,7 @@ class VideoDataset(AuditoriaMixin, Base):
     resolucion = Column(String(100))
     tamaño_bytes = Column(Integer, nullable=True)
     formato = Column(String(10), nullable=True)
+    mano_detectada = Column(String(20), nullable=True, index=True)
     notas = Column(Text, nullable=True)
 
     procesado = Column(Boolean, default=False, index=True)

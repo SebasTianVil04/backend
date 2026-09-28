@@ -238,48 +238,7 @@ def crear_directorios():
         log(f"Directorio creado/verificado: {directorio}")
 
 
-def crear_tablas_con_timeout(timeout_segundos: int = 15):
-    resultado = {"error": None, "completado": False}
-
-    def objetivo():
-        try:
-            crear_tablas()
-            resultado["completado"] = True
-        except Exception as e:
-            resultado["error"] = e
-
-    hilo = threading.Thread(target=objetivo, daemon=True)
-    hilo.start()
-    hilo.join(timeout=timeout_segundos)
-
-    if hilo.is_alive():
-        log(f"ADVERTENCIA: crear_tablas() no respondió en {timeout_segundos}s.")
-        log("Probable causa: la base de datos no está accesible (host/puerto/credenciales) o la conexión está colgada.")
-        return False
-
-    if resultado["error"] is not None:
-        log(f"Error en base de datos: {resultado['error']}")
-        return False
-
-    return resultado["completado"]
-
-
-import logging
-logging.basicConfig(level=logging.INFO)
-
-
 def sembrar_datos_iniciales():
-    """
-    Orden OBLIGATORIO: permisos -> roles -> admin -> menú.
-    - seed_permisos crea el catálogo de permisos en BD.
-    - seed_roles crea los roles y resuelve sus permisos por código
-      (necesita que los permisos ya existan).
-    - seed_admin crea/asegura el administrador principal, leyendo
-      credenciales de variables de entorno (ADMIN_EMAIL, ADMIN_PASSWORD,
-      etc.). Necesita que el rol "admin" ya exista. Si faltan las
-      variables de entorno, se omite con un warning sin romper el arranque.
-    - seed_menu crea los ítems de menú (referencian permisos por código).
-    """
     try:
         from app.utilidades.base_datos import SessionLocal
     except Exception as e:
@@ -334,6 +293,35 @@ def sembrar_datos_iniciales():
         db.close()
 
 
+def inicializar_base_de_datos(timeout_segundos: int = 60):
+    resultado = {"error": None, "completado": False}
+
+    def objetivo():
+        try:
+            crear_tablas()
+            sembrar_datos_iniciales()
+            resultado["completado"] = True
+        except Exception as e:
+            resultado["error"] = e
+
+    hilo = threading.Thread(target=objetivo, daemon=True)
+    hilo.start()
+    hilo.join(timeout=timeout_segundos)
+
+    if hilo.is_alive():
+        log(f"ADVERTENCIA: la inicialización de la BD no terminó en {timeout_segundos}s.")
+        log("El hilo sigue corriendo en segundo plano; los seeds se ejecutarán cuando termine.")
+        log("Si el error persiste, verifica la conexión a Supabase o ejecuta manualmente:")
+        log("  .venv\\Scripts\\python.exe -m app.semillas.ejecutar_seeds")
+        return False
+
+    if resultado["error"] is not None:
+        log(f"Error en base de datos: {resultado['error']}")
+        return False
+
+    return resultado["completado"]
+
+
 @app.on_event("startup")
 async def startup_event():
     log("=" * 50)
@@ -346,11 +334,10 @@ async def startup_event():
     except Exception as e:
         log(f"Error creando directorios: {e}")
 
-    if crear_tablas_con_timeout():
-        log("Base de datos verificada")
-        sembrar_datos_iniciales()
+    if inicializar_base_de_datos(timeout_segundos=60):
+        log("Base de datos verificada y datos iniciales sembrados")
     else:
-        log("Continuando sin confirmar la base de datos (revisa la conexión).")
+        log("La inicialización sigue en curso o falló. Revisa los logs.")
 
     log("SIGNAFREE API LISTA")
     log(f"Servidor: http://{configuracion.host}:{configuracion.port}")

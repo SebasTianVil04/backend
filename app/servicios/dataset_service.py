@@ -1,22 +1,32 @@
 import os
-import cv2
-import numpy as np
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime
-import json
-import tempfile
 import gc
+import json
+import shutil
+import tempfile
 import subprocess
+import logging
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-import logging
-import time
-import mediapipe as mp
 
 from ..modelos.dataset import CategoriaDataset, VideoDataset
-from ..servicios.config_tipo_senas import detectar_tipo_sena, obtener_config_sena, redimensionar_manteniendo_aspecto
-from ..servicios.drive_service import subir_archivo_a_drive
+from ..servicios.config_tipo_senas import obtener_config_sena
+from ..servicios.drive_service import (
+    subir_archivo_a_drive,
+    descargar_videos_temporalmente,
+    limpiar_carpeta_temporal,
+)
+from ..servicios.extractor_secuencias import (
+    extraer_secuencia_landmarks,
+    secuencia_desde_keypoints,
+    detectar_lateralidad,
+    ResultadoSecuencia,
+    VERSION_SECUENCIAS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,15 +37,12 @@ class DatasetService:
         self.video_dir = Path("archivos_subidos") / "videos_dataset"
         self.video_dir.mkdir(parents=True, exist_ok=True)
 
-        self.resolucion_frame = (224, 224)
-        self.ffmpeg_disponible = self._verificar_ffmpeg()
+        self.secuencias_dir = Path("archivos_subidos") / "secuencias_dataset"
+        self.secuencias_dir.mkdir(parents=True, exist_ok=True)
 
-        self.mp_hands = mp.solutions.hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+        self.num_frames = 20
+
+        self.ffmpeg_disponible = self._verificar_ffmpeg()
 
         logger.info(f"DatasetService inicializado - FFmpeg: {'Disponible' if self.ffmpeg_disponible else 'No disponible'}")
 
@@ -48,10 +55,10 @@ class DatasetService:
                 timeout=5
             )
             return result.returncode == 0
-        except:
+        except Exception:
             return False
 
-    def _convertir_webm_a_mp4(self, ruta_webm: str, ruta_mp4: str) -> bool:
+    def _convertir_a_mp4(self, ruta_origen: str, ruta_mp4: str) -> bool:
         if not self.ffmpeg_disponible:
             logger.warning("FFmpeg no disponible, saltando conversión")
             return False
@@ -59,19 +66,18 @@ class DatasetService:
         try:
             cmd = [
                 'ffmpeg',
-                '-i', ruta_webm,
+                '-i', ruta_origen,
                 '-c:v', 'libx264',
-                '-preset', 'ultrafast',
-                '-crf', '28',
+                '-preset', 'veryfast',
+                '-crf', '20',
                 '-pix_fmt', 'yuv420p',
                 '-movflags', '+faststart',
-                '-vf', 'fps=30',
                 '-an',
                 '-y',
                 ruta_mp4
             ]
 
-            logger.info(f"Convirtiendo WebM a MP4: {os.path.basename(ruta_webm)}")
+            logger.info(f"Convirtiendo a MP4: {os.path.basename(ruta_origen)}")
 
             result = subprocess.run(
                 cmd,
@@ -83,238 +89,115 @@ class DatasetService:
             if result.returncode == 0 and os.path.exists(ruta_mp4):
                 tamaño_mp4 = os.path.getsize(ruta_mp4)
                 if tamaño_mp4 > 1024:
-                    logger.info(f"✓ Conversión exitosa: {tamaño_mp4:,} bytes")
+                    logger.info(f"Conversión exitosa: {tamaño_mp4:,} bytes")
                     return True
                 else:
-                    logger.error(f"✗ MP4 muy pequeño: {tamaño_mp4} bytes")
+                    logger.error(f"MP4 muy pequeño: {tamaño_mp4} bytes")
                     if os.path.exists(ruta_mp4):
                         os.remove(ruta_mp4)
                     return False
             else:
-                logger.error(f"✗ FFmpeg falló con código {result.returncode}")
+                logger.error(f"FFmpeg falló con código {result.returncode}")
                 if result.stderr:
                     logger.error(f"Error FFmpeg: {result.stderr[:500]}")
                 return False
 
         except subprocess.TimeoutExpired:
-            logger.error("✗ Timeout en conversión FFmpeg (60s)")
+            logger.error("Timeout en conversión FFmpeg (60s)")
             return False
         except Exception as e:
-            logger.error(f"✗ Error en conversión: {e}")
+            logger.error(f"Error en conversión: {e}")
             return False
 
-    def _extraer_keypoints_frame(self, frame: np.ndarray) -> Optional[np.ndarray]:
+    def _procesar_secuencia(
+        self,
+        nombre_sena: str,
+        ruta_video: Optional[str] = None,
+        keypoints_cliente: Optional[list] = None,
+    ) -> Tuple[int, float, float, int, float, Optional[ResultadoSecuencia]]:
         try:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.mp_hands.process(frame_rgb)
+            num_frames = self.num_frames
 
-            if not results.multi_hand_landmarks or not results.multi_handedness:
-                return None
+            if keypoints_cliente is not None and len(keypoints_cliente) > 0:
+                arrs = [np.asarray(k, dtype=np.float32) for k in keypoints_cliente]
+                resultado = secuencia_desde_keypoints(arrs, num_frames, fps=30.0)
+            else:
+                resultado = extraer_secuencia_landmarks(ruta_video, num_frames)
 
-            manos = {'Right': None, 'Left': None}
-            for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
-                etiqueta = handedness.classification[0].label
-                valores = []
-                for landmark in hand_landmarks.landmark:
-                    valores.extend([landmark.x, landmark.y, landmark.z])
-                if len(valores) == 63:
-                    manos[etiqueta] = valores
+            if resultado is None:
+                return 0, 0.5, 30.0, 0, 1.0, None
 
-            mano_derecha = manos['Right'] if manos['Right'] is not None else [0.0] * 63
-            mano_izquierda = manos['Left'] if manos['Left'] is not None else [0.0] * 63
-            keypoints = mano_derecha + mano_izquierda
+            duracion = resultado.frames_totales / resultado.fps if resultado.fps > 0 else 1.0
 
-            if len(keypoints) != 126:
-                return None
-
-            return np.array(keypoints, dtype=np.float32)
-
-        except Exception as e:
-            logger.warning(f"Error extrayendo keypoints: {e}")
-            return None
-
-    def _extraer_keypoints_opencv_robusto(self, ruta_video: str, nombre_sena: str, max_frames: Optional[int] = None) -> Tuple[int, float]:
-        if max_frames is None:
-            config = obtener_config_sena(nombre_sena)
-            max_frames = config.get('num_frames_recomendado', 20)
-
-        backends = [
-            ('CAP_FFMPEG', cv2.CAP_FFMPEG),
-            ('CAP_ANY (default)', cv2.CAP_ANY),
-        ]
-
-        for backend_name, backend_flag in backends:
-            logger.info(f"🔍 Intentando extraer keypoints con {backend_name} (objetivo: {max_frames} frames)...")
-            resultado = self._extraer_keypoints_con_backend(
-                ruta_video, nombre_sena, max_frames, backend_flag, backend_name
+            return (
+                resultado.keypoints_validos,
+                resultado.calidad,
+                resultado.fps,
+                resultado.frames_totales,
+                duracion,
+                resultado
             )
 
-            if resultado[0] > 0:
-                logger.info(f"✓ Extracción exitosa con {backend_name}: {resultado[0]} keypoints")
-                return resultado
-            else:
-                logger.warning(f"⚠ Falló con {backend_name}, intentando siguiente método...")
+        except Exception as e:
+            logger.error(f"Error procesando secuencia: {e}", exc_info=True)
+            return 0, 0.5, 30.0, 0, 1.0, None
 
-        logger.error(f"✗ No se pudieron extraer keypoints con ningún método")
-        return 0, 0.0
-
-    def _extraer_keypoints_con_backend(
+    def _calcular_aprobacion(
         self,
-        ruta_video: str,
+        keypoints_extraidos: int,
+        resultado: Optional[ResultadoSecuencia],
         nombre_sena: str,
-        max_frames: int,
-        backend: int,
-        backend_name: str
-    ) -> Tuple[int, float]:
-        cap = None
-        keypoints_detectados = 0
-        calidad_total = 0.0
+    ) -> Tuple[bool, int]:
+        umbral_densidad = max(3, int(self.num_frames * 0.6))
+
+        if resultado is None:
+            return False, umbral_densidad
+
+        fps = resultado.fps if resultado.fps and resultado.fps > 0 else 30.0
+        frames_detectados_minimos = max(5, int(fps * 0.3))
+
+        aprobado = (
+            keypoints_extraidos >= umbral_densidad
+            and resultado.frames_detectados >= frames_detectados_minimos
+        )
+        return aprobado, umbral_densidad
+
+    def _guardar_secuencia(self, video_id: int, resultado: Optional[ResultadoSecuencia]) -> None:
+        if resultado is None:
+            return
 
         try:
-            cap = cv2.VideoCapture(ruta_video, backend)
-
-            if not cap.isOpened():
-                return 0, 0.0
-
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-            if fps is None or fps <= 0 or fps > 500:
-                fps = 30.0
-
-            logger.info(f"   Video info: {width}x{height}, {total_frames} frames, {fps:.1f} FPS")
-
-            if width <= 0 or height <= 0 or width > 10000 or height > 10000:
-                logger.warning(f"   ⚠ Dimensiones inválidas: {width}x{height}")
-                return 0, 0.0
-
-            frame_count = 0
-            frames_saltados = max(1, 3)
-            intentos_fallidos_consecutivos = 0
-            max_intentos_consecutivos = 10
-            max_iteraciones = max(150, max_frames * 8)
-
-            while keypoints_detectados < max_frames and frame_count < max_iteraciones:
-                ret, frame = cap.read()
-
-                if not ret or frame is None:
-                    intentos_fallidos_consecutivos += 1
-                    if intentos_fallidos_consecutivos >= max_intentos_consecutivos:
-                        logger.warning(f"   ⚠ {max_intentos_consecutivos} fallos consecutivos, deteniendo")
-                        break
-                    frame_count += 1
-                    continue
-
-                if frame_count % frames_saltados != 0:
-                    frame_count += 1
-                    continue
-
-                if len(frame.shape) != 3:
-                    logger.warning(f"   ⚠ Shape inválido: {frame.shape}")
-                    intentos_fallidos_consecutivos += 1
-                    frame_count += 1
-                    continue
-
-                frame_height, frame_width, frame_channels = frame.shape
-
-                if frame_height < 10 or frame_width < 10:
-                    logger.warning(f"   ⚠ Frame muy pequeño: {frame_width}x{frame_height}")
-                    intentos_fallidos_consecutivos += 1
-                    frame_count += 1
-                    continue
-
-                if frame_height == 1 or frame_width == 1:
-                    logger.warning(f"   ⚠ Frame corrupto (dimensión = 1): {frame_width}x{frame_height}")
-                    intentos_fallidos_consecutivos += 1
-                    frame_count += 1
-                    continue
-
-                if frame_height > 10000 or frame_width > 10000:
-                    logger.warning(f"   ⚠ Frame corrupto (muy grande): {frame_width}x{frame_height}")
-                    intentos_fallidos_consecutivos += 1
-                    frame_count += 1
-                    continue
-
-                if frame_channels not in [1, 3, 4]:
-                    logger.warning(f"   ⚠ Canales inválidos: {frame_channels}")
-                    intentos_fallidos_consecutivos += 1
-                    frame_count += 1
-                    continue
-
-                intentos_fallidos_consecutivos = 0
-
-                try:
-                    if frame_channels == 1:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-                    elif frame_channels == 4:
-                        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-
-                    frame_resized = redimensionar_manteniendo_aspecto(frame, self.resolucion_frame)
-
-                    keypoints = self._extraer_keypoints_frame(frame_resized)
-
-                    if keypoints is not None:
-                        keypoints_detectados += 1
-
-                        num_manos = 1 if np.sum(keypoints[63:]) == 0 else 2
-                        calidad = 0.9 if num_manos == 2 else 0.6
-                        calidad_total += calidad
-
-                        if keypoints_detectados % 5 == 0:
-                            logger.info(f"   ✓ {keypoints_detectados}/{max_frames} keypoints detectados")
-
-                except Exception as e:
-                    logger.warning(f"   ⚠ Error procesando frame: {e}")
-                    intentos_fallidos_consecutivos += 1
-
-                frame_count += 1
-
-            calidad_promedio = calidad_total / keypoints_detectados if keypoints_detectados > 0 else 0.5
-            return keypoints_detectados, calidad_promedio
-
+            np.savez_compressed(
+                self.secuencias_dir / f"{video_id}.npz",
+                secuencia=resultado.secuencia,
+                estado=resultado.estado,
+                version=np.array(VERSION_SECUENCIAS),
+            )
+            logger.info(f"Secuencia guardada: {video_id}.npz {resultado.secuencia.shape}")
         except Exception as e:
-            logger.error(f"   ✗ Error con {backend_name}: {e}")
-            return 0, 0.0
-        finally:
-            if cap is not None:
-                cap.release()
+            logger.warning(f"No se pudo guardar la secuencia del video {video_id}: {e}")
 
-    def _procesar_video_directo(self, ruta_video: str, nombre_sena: str) -> Tuple[int, float, float, int, float]:
-        cap = None
+    def _guardar_keypoints_cliente(self, video_id: int, keypoints_cliente: Optional[list]) -> None:
+        if not keypoints_cliente:
+            return
 
         try:
-            keypoints_extraidos, calidad_promedio = self._extraer_keypoints_opencv_robusto(ruta_video, nombre_sena)
-
-            cap = cv2.VideoCapture(ruta_video)
-
-            if cap.isOpened():
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-                if fps is None or fps <= 0 or fps > 500:
-                    fps = 30.0
-
-                if total_frames <= 0 or total_frames > 1000000:
-                    total_frames = max(keypoints_extraidos * 2, 30)
-
-                duracion = total_frames / fps if fps > 0 else 1.0
-
-                cap.release()
-            else:
-                fps = 30.0
-                total_frames = keypoints_extraidos * 2
-                duracion = 1.0
-
-            return keypoints_extraidos, calidad_promedio, fps, total_frames, duracion
-
+            arr = np.array(keypoints_cliente, dtype=np.float32)
+            np.savez_compressed(self.secuencias_dir / f"{video_id}_kp_cliente.npz", keypoints=arr)
+            logger.info(f"Keypoints del cliente guardados: {video_id}_kp_cliente.npz {arr.shape}")
         except Exception as e:
-            logger.error(f"✗ Error procesando video: {e}", exc_info=True)
-            return 0, 0.5, 30.0, 0, 1.0
-        finally:
-            if cap is not None:
-                cap.release()
+            logger.warning(f"No se pudieron guardar los keypoints del cliente del video {video_id}: {e}")
+
+    def _cargar_keypoints_cliente(self, video_id: int) -> Optional[list]:
+        ruta = self.secuencias_dir / f"{video_id}_kp_cliente.npz"
+        if not ruta.exists():
+            return None
+
+        try:
+            return list(np.load(ruta)["keypoints"])
+        except Exception as e:
+            logger.warning(f"No se pudieron leer los keypoints del cliente del video {video_id}: {e}")
+            return None
 
     def _subir_video_a_drive_y_limpiar(self, ruta_video_local: str, formato: str) -> Dict[str, Optional[str]]:
         resultado = {"drive_file_id": None, "drive_url": None}
@@ -359,7 +242,8 @@ class DatasetService:
         archivo: any,
         categoria_id: int,
         sena: str,
-        usuario_id: int
+        usuario_id: int,
+        keypoints: Optional[str] = None,
     ) -> VideoDataset:
         temp_video_path = None
         temp_mp4_path = None
@@ -373,64 +257,78 @@ class DatasetService:
             if len(contenido_video) < 1024:
                 raise ValueError("Archivo de video demasiado pequeño")
 
-            logger.info(f"📹 Procesando video: {sena}, {len(contenido_video):,} bytes")
+            logger.info(f"Procesando video: {sena}, {len(contenido_video):,} bytes")
+
+            keypoints_cliente = None
+            if keypoints:
+                try:
+                    datos_kp = json.loads(keypoints)
+                    if isinstance(datos_kp, list) and datos_kp:
+                        keypoints_cliente = datos_kp
+                except Exception as e:
+                    logger.warning(f"No se pudo parsear 'keypoints' del cliente, se usará extracción por video: {e}")
+
+            extension_original = Path(getattr(archivo, 'filename', '') or '').suffix.lower()
+            if extension_original not in ('.webm', '.mp4'):
+                extension_original = '.webm'
 
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
 
-            nombre_webm = f"{sena}_{timestamp}.webm"
-            ruta_webm_final = self.video_dir / nombre_webm
+            ruta_original = self.video_dir / f"{sena}_{timestamp}{extension_original}"
 
-            with open(ruta_webm_final, 'wb') as f:
+            with open(ruta_original, 'wb') as f:
                 f.write(contenido_video)
 
-            logger.info(f"✓ WebM guardado: {ruta_webm_final}")
+            logger.info(f"Video original guardado: {ruta_original}")
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as temp_file:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=extension_original) as temp_file:
                 temp_file.write(contenido_video)
                 temp_video_path = temp_file.name
 
-            conversion_exitosa = False
-            formato_guardado = "webm"
-            ruta_video_final = str(ruta_webm_final)
+            formato_guardado = extension_original.lstrip('.')
+            ruta_video_final = str(ruta_original)
 
             if self.ffmpeg_disponible:
-                nombre_mp4 = f"{sena}_{timestamp}.mp4"
-                ruta_mp4_final = self.video_dir / nombre_mp4
-                temp_mp4_path = temp_video_path.replace('.webm', '_temp.mp4')
+                ruta_mp4_final = self.video_dir / f"{sena}_{timestamp}.mp4"
+                temp_mp4_path = temp_video_path + '_temp.mp4'
 
-                logger.info(f"🔄 Convirtiendo a MP4...")
+                logger.info("Convirtiendo a MP4...")
 
-                if self._convertir_webm_a_mp4(temp_video_path, temp_mp4_path):
+                if self._convertir_a_mp4(temp_video_path, temp_mp4_path):
                     if os.path.exists(temp_mp4_path) and os.path.getsize(temp_mp4_path) > 1024:
-                        import shutil
                         shutil.move(temp_mp4_path, str(ruta_mp4_final))
-                        conversion_exitosa = True
                         formato_guardado = "mp4"
                         ruta_video_final = str(ruta_mp4_final)
 
-                        logger.info(f"✓ MP4 guardado exitosamente: {ruta_mp4_final}")
+                        logger.info(f"MP4 guardado exitosamente: {ruta_mp4_final}")
 
-                        try:
-                            os.remove(ruta_webm_final)
-                            logger.info("✓ WebM eliminado (MP4 es la versión final)")
-                        except Exception as e:
-                            logger.warning(f"No se pudo eliminar WebM: {e}")
+                        if ruta_original != ruta_mp4_final:
+                            try:
+                                os.remove(ruta_original)
+                                logger.info("Original eliminado (MP4 es la versión final)")
+                            except Exception as e:
+                                logger.warning(f"No se pudo eliminar el original: {e}")
                     else:
-                        logger.warning("⚠ MP4 generado es inválido, intentando con WebM")
+                        logger.warning("MP4 generado es inválido, se usa el video original")
                 else:
-                    logger.warning("⚠ Conversión a MP4 falló, intentando con WebM")
+                    logger.warning("Conversión a MP4 falló, se usa el video original")
             else:
-                logger.warning("⚠ FFmpeg no disponible, intentando procesar WebM directamente")
+                logger.warning("FFmpeg no disponible, se procesa el video original directamente")
                 logger.warning("   RECOMENDACIÓN: Instale FFmpeg para mejor compatibilidad")
 
-            logger.info(f"📊 Extrayendo keypoints de {formato_guardado.upper()}...")
-            keypoints_extraidos, calidad_promedio, fps_real, total_frames, duracion_real = self._procesar_video_directo(
-                ruta_video_final, sena
+            logger.info(
+                "Extrayendo secuencia "
+                + ("(keypoints del cliente)" if keypoints_cliente else f"de {formato_guardado.upper()}")
+            )
+            (keypoints_extraidos, calidad_promedio, fps_real,
+             total_frames, duracion_real, secuencia) = self._procesar_secuencia(
+                sena, ruta_video_final, keypoints_cliente
             )
 
+            mano_detectada = detectar_lateralidad(secuencia) if secuencia is not None else "no_detectada"
+
+            aprobado, umbral_aprobacion = self._calcular_aprobacion(keypoints_extraidos, secuencia, sena)
             config_sena = obtener_config_sena(sena)
-            umbral_aprobacion = max(3, int(config_sena.get('num_frames_recomendado', 20) * 0.6))
-            aprobado = keypoints_extraidos >= umbral_aprobacion
 
             drive_info = self._subir_video_a_drive_y_limpiar(ruta_video_final, formato_guardado)
             subio_a_drive = drive_info["drive_file_id"] is not None
@@ -453,12 +351,13 @@ class DatasetService:
                 resolucion=json.dumps({"ancho": 640, "alto": 480}),
                 tamaño_bytes=len(contenido_video),
                 formato=formato_guardado,
+                mano_detectada=mano_detectada,
                 frames_extraidos=keypoints_extraidos,
                 calidad_promedio=calidad_promedio,
                 procesado=True,
                 aprobado=aprobado,
                 fecha_procesado=datetime.utcnow(),
-                notas=f"Formato: {formato_guardado.upper()}, Keypoints: {keypoints_extraidos}/{config_sena.get('num_frames_recomendado', 20)}, Calidad: {calidad_promedio:.2f}{notas_extra}"
+                notas=f"Formato: {formato_guardado.upper()}, Keypoints: {keypoints_extraidos}/{self.num_frames}, Calidad: {calidad_promedio:.2f}, Mano: {mano_detectada}{notas_extra}"
             )
 
             if aprobado:
@@ -468,15 +367,18 @@ class DatasetService:
             db.commit()
             db.refresh(video_db)
 
-            estado = "✓ APROBADO" if aprobado else "⚠ PENDIENTE"
-            drive_estado = "☁ Drive OK" if subio_a_drive else "⚠ Solo local"
-            logger.info(f"{estado} - Video {video_db.id} - {keypoints_extraidos} keypoints - {formato_guardado.upper()} - {drive_estado}")
+            self._guardar_secuencia(video_db.id, secuencia)
+            self._guardar_keypoints_cliente(video_db.id, keypoints_cliente)
+
+            estado = "APROBADO" if aprobado else "PENDIENTE"
+            drive_estado = "Drive OK" if subio_a_drive else "Solo local"
+            logger.info(f"{estado} - Video {video_db.id} - {keypoints_extraidos} keypoints - {formato_guardado.upper()} - Mano: {mano_detectada} - {drive_estado}")
 
             return video_db
 
         except Exception as e:
             db.rollback()
-            logger.error(f"✗ Error procesando video: {str(e)}", exc_info=True)
+            logger.error(f"Error procesando video: {str(e)}", exc_info=True)
 
             try:
                 video_db = VideoDataset(
@@ -489,6 +391,7 @@ class DatasetService:
                     resolucion=json.dumps({"ancho": 0, "alto": 0}),
                     tamaño_bytes=len(contenido_video) if 'contenido_video' in locals() else 0,
                     formato="webm",
+                    mano_detectada="no_detectada",
                     frames_extraidos=0,
                     calidad_promedio=0.0,
                     procesado=False,
@@ -501,21 +404,57 @@ class DatasetService:
                 db.refresh(video_db)
                 return video_db
             except Exception as inner_e:
-                logger.error(f"✗ Error en fallback: {inner_e}")
+                logger.error(f"Error en fallback: {inner_e}")
                 raise Exception(f"Error procesando video: {str(e)}")
 
         finally:
-            if temp_video_path and os.path.exists(temp_video_path):
-                try:
-                    os.unlink(temp_video_path)
-                except:
-                    pass
-            if temp_mp4_path and os.path.exists(temp_mp4_path):
-                try:
-                    os.unlink(temp_mp4_path)
-                except:
-                    pass
+            for ruta_temporal in (temp_video_path, temp_mp4_path):
+                if ruta_temporal and os.path.exists(ruta_temporal):
+                    try:
+                        os.unlink(ruta_temporal)
+                    except Exception:
+                        pass
             gc.collect()
+
+    def cargar_secuencias_entrenamiento(
+        self,
+        db: Session,
+        categoria_ids: Optional[List[int]] = None
+    ) -> Tuple[np.ndarray, List[str]]:
+        query = db.query(VideoDataset).filter(VideoDataset.aprobado == True)
+
+        if categoria_ids:
+            query = query.filter(VideoDataset.categoria_id.in_(categoria_ids))
+
+        X: List[np.ndarray] = []
+        y: List[str] = []
+
+        for video in query.all():
+            ruta = self.secuencias_dir / f"{video.id}.npz"
+            if not ruta.exists():
+                continue
+
+            datos = np.load(ruta)
+            if "version" not in datos or int(datos["version"]) != VERSION_SECUENCIAS:
+                continue
+            if not (datos["estado"] > 0).any():
+                continue
+            if datos["secuencia"].shape[0] != self.num_frames:
+                logger.warning(
+                    f"Secuencia del video {video.id} tiene {datos['secuencia'].shape[0]} frames, "
+                    f"se esperaban {self.num_frames}. Video descartado (reprocesar_video corrige esto)."
+                )
+                continue
+
+            X.append(datos["secuencia"])
+            y.append(video.sena)
+
+        logger.info(f"Secuencias cargadas: {len(X)} de {len(set(y))} señas")
+
+        if not X:
+            return np.zeros((0, self.num_frames, 126), dtype=np.float32), []
+
+        return np.array(X, dtype=np.float32), y
 
     def preparar_dataset_entrenamiento(
         self,
@@ -537,7 +476,7 @@ class DatasetService:
             if video.ruta_video and os.path.exists(video.ruta_video):
                 dataset[sena].append(video.ruta_video)
 
-        logger.info(f"📊 Dataset preparado (solo locales): {len(dataset)} señas, {sum(len(v) for v in dataset.values())} videos")
+        logger.info(f"Dataset preparado (solo locales): {len(dataset)} señas, {sum(len(v) for v in dataset.values())} videos")
         return dataset
 
     def obtener_estadisticas_dataset(self, db: Session) -> Dict[str, any]:
@@ -572,7 +511,7 @@ class DatasetService:
             }
 
         except Exception as e:
-            logger.error(f"✗ Error obteniendo estadísticas: {str(e)}")
+            logger.error(f"Error obteniendo estadísticas: {str(e)}")
             return {
                 "total_videos": 0,
                 "videos_aprobados": 0,
@@ -598,13 +537,13 @@ class DatasetService:
             db.commit()
             db.refresh(video)
 
-            logger.info(f"✓ Video {video_id} {'aprobado' if aprobar else 'rechazado'}")
+            logger.info(f"Video {video_id} {'aprobado' if aprobar else 'rechazado'}")
 
             return video
 
         except Exception as e:
             db.rollback()
-            logger.error(f"✗ Error aprobando video: {str(e)}")
+            logger.error(f"Error aprobando video: {str(e)}")
             raise Exception(f"Error aprobando video: {str(e)}")
 
     def reprocesar_video(self, db: Session, video_id: int) -> VideoDataset:
@@ -614,29 +553,33 @@ class DatasetService:
             if not video:
                 raise Exception("Video no encontrado")
 
-            if not video.ruta_video or not os.path.exists(video.ruta_video):
+            keypoints_cliente = self._cargar_keypoints_cliente(video_id)
+
+            if keypoints_cliente is None and (not video.ruta_video or not os.path.exists(video.ruta_video)):
                 raise Exception(
-                    "Archivo de video no encontrado localmente. "
+                    "Archivo de video no encontrado localmente y no hay keypoints del cliente guardados. "
                     "El video probablemente ya se subió a Drive y se eliminó localmente."
                 )
 
-            logger.info(f"🔄 Reprocesando video {video_id}: {video.sena}")
+            logger.info(f"Reprocesando video {video_id}: {video.sena}")
 
-            keypoints_extraidos, calidad_promedio, fps_real, total_frames, duracion_real = self._procesar_video_directo(
-                video.ruta_video, video.sena
+            (keypoints_extraidos, calidad_promedio, fps_real,
+             total_frames, duracion_real, secuencia) = self._procesar_secuencia(
+                video.sena, video.ruta_video, keypoints_cliente
             )
 
-            config_sena = obtener_config_sena(video.sena)
-            umbral_aprobacion = max(3, int(config_sena.get('num_frames_recomendado', 20) * 0.6))
+            video.mano_detectada = detectar_lateralidad(secuencia) if secuencia is not None else "no_detectada"
+
+            aprobado, umbral_aprobacion = self._calcular_aprobacion(keypoints_extraidos, secuencia, video.sena)
 
             video.frames_extraidos = keypoints_extraidos
             video.calidad_promedio = calidad_promedio
             video.fps = fps_real
             video.duracion_segundos = duracion_real
             video.procesado = True
-            video.aprobado = keypoints_extraidos >= umbral_aprobacion
+            video.aprobado = aprobado
             video.fecha_procesado = datetime.utcnow()
-            video.notas = f"Reprocesado: {keypoints_extraidos}/{config_sena.get('num_frames_recomendado', 20)} keypoints, Calidad: {calidad_promedio:.2f}"
+            video.notas = f"Reprocesado: {keypoints_extraidos}/{self.num_frames} keypoints, Calidad: {calidad_promedio:.2f}, Mano: {video.mano_detectada}"
 
             if video.aprobado:
                 video.fecha_aprobado = datetime.utcnow()
@@ -644,14 +587,143 @@ class DatasetService:
             db.commit()
             db.refresh(video)
 
-            logger.info(f"✓ Video {video_id} reprocesado: {keypoints_extraidos} keypoints")
+            self._guardar_secuencia(video.id, secuencia)
+
+            logger.info(f"Video {video_id} reprocesado: {keypoints_extraidos} keypoints")
 
             return video
 
         except Exception as e:
             db.rollback()
-            logger.error(f"✗ Error reprocesando video: {str(e)}")
+            logger.error(f"Error reprocesando video: {str(e)}")
             raise Exception(f"Error reprocesando video: {str(e)}")
+
+    def reprocesar_todos(
+        self,
+        db: Session,
+        categoria_ids: Optional[List[int]] = None,
+        incluir_no_aprobados: bool = True,
+        incluir_aprobados: bool = True,
+    ) -> Dict[str, any]:
+        query = db.query(VideoDataset)
+        if categoria_ids:
+            query = query.filter(VideoDataset.categoria_id.in_(categoria_ids))
+
+        estados_incluidos = []
+        if incluir_aprobados:
+            estados_incluidos.append(True)
+        if incluir_no_aprobados:
+            estados_incluidos.append(False)
+        if estados_incluidos:
+            query = query.filter(VideoDataset.aprobado.in_(estados_incluidos))
+
+        videos = query.all()
+
+        con_kp_cliente = {v.id: self._cargar_keypoints_cliente(v.id) for v in videos}
+        con_kp_cliente = {vid: kp for vid, kp in con_kp_cliente.items() if kp is not None}
+
+        con_kp = [v for v in videos if v.id in con_kp_cliente]
+        sin_kp = [v for v in videos if v.id not in con_kp_cliente]
+
+        locales = [v for v in sin_kp if v.ruta_video and os.path.exists(v.ruta_video)]
+        solo_drive = [v for v in sin_kp if v not in locales and v.drive_file_id]
+        sin_archivo = [v for v in sin_kp if v not in locales and v not in solo_drive]
+
+        logger.info(
+            f"Reprocesamiento masivo: {len(videos)} videos totales | "
+            f"{len(con_kp)} con keypoints de cliente | {len(locales)} locales | "
+            f"{len(solo_drive)} solo en Drive | {len(sin_archivo)} sin archivo disponible"
+        )
+
+        rutas_temporales: Dict[int, str] = {}
+        carpeta_temporal = f"temp_reproceso_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        if solo_drive:
+            logger.info(f"Descargando {len(solo_drive)} videos desde Drive para reprocesar...")
+            rutas_temporales = descargar_videos_temporalmente(
+                solo_drive, carpeta_temporal=carpeta_temporal
+            )
+
+        resumen = {
+            "total": len(videos),
+            "reprocesados_ok": 0,
+            "pasaron_a_aprobado": 0,
+            "pasaron_a_no_aprobado": 0,
+            "sin_cambio": 0,
+            "fallidos": [],
+            "sin_archivo_disponible": [v.id for v in sin_archivo],
+        }
+
+        try:
+            for video in con_kp + locales + solo_drive:
+                keypoints_cliente = con_kp_cliente.get(video.id)
+                ruta = None
+                if keypoints_cliente is None:
+                    ruta = video.ruta_video if video in locales else rutas_temporales.get(video.id)
+                    if not ruta or not os.path.exists(ruta):
+                        resumen["fallidos"].append({"id": video.id, "motivo": "archivo no disponible"})
+                        continue
+
+                try:
+                    aprobado_antes = video.aprobado
+
+                    (keypoints_extraidos, calidad_promedio, fps_real,
+                     total_frames, duracion_real, secuencia) = self._procesar_secuencia(
+                        video.sena, ruta, keypoints_cliente
+                    )
+
+                    video.mano_detectada = detectar_lateralidad(secuencia) if secuencia is not None else "no_detectada"
+
+                    aprobado_nuevo, _ = self._calcular_aprobacion(keypoints_extraidos, secuencia, video.sena)
+
+                    video.frames_extraidos = keypoints_extraidos
+                    video.calidad_promedio = calidad_promedio
+                    video.fps = fps_real
+                    video.duracion_segundos = duracion_real
+                    video.procesado = True
+                    video.aprobado = aprobado_nuevo
+                    video.fecha_procesado = datetime.utcnow()
+                    video.notas = (
+                        f"Reprocesado (lote): {keypoints_extraidos}/{self.num_frames} "
+                        f"keypoints, Calidad: {calidad_promedio:.2f}, Mano: {video.mano_detectada}"
+                    )
+
+                    if video.aprobado:
+                        video.fecha_aprobado = datetime.utcnow()
+                    else:
+                        video.fecha_aprobado = None
+
+                    db.commit()
+                    db.refresh(video)
+
+                    self._guardar_secuencia(video.id, secuencia)
+
+                    resumen["reprocesados_ok"] += 1
+                    if aprobado_antes == video.aprobado:
+                        resumen["sin_cambio"] += 1
+                    elif video.aprobado:
+                        resumen["pasaron_a_aprobado"] += 1
+                    else:
+                        resumen["pasaron_a_no_aprobado"] += 1
+
+                    logger.info(
+                        f"Video {video.id} reprocesado: {keypoints_extraidos} keypoints, "
+                        f"aprobado {aprobado_antes} -> {video.aprobado}"
+                    )
+                except Exception as e:
+                    db.rollback()
+                    logger.error(f"Error reprocesando video {video.id}: {e}")
+                    resumen["fallidos"].append({"id": video.id, "motivo": str(e)})
+        finally:
+            if solo_drive:
+                try:
+                    limpiar_carpeta_temporal(carpeta_temporal)
+                except Exception as e:
+                    logger.warning(f"No se pudo limpiar carpeta temporal '{carpeta_temporal}': {e}")
+            gc.collect()
+
+        logger.info(f"Reprocesamiento masivo terminado: {resumen}")
+        return resumen
 
 
 dataset_service = DatasetService()

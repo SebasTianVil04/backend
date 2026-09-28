@@ -12,12 +12,10 @@ from threading import Lock
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 
-import cv2
 import torch
 import numpy as np
 import torch.nn as nn
 import torch.optim as optim
-import mediapipe as mp
 from torch.utils.data import Dataset, DataLoader
 from sqlalchemy.orm import Session
 from sklearn.model_selection import StratifiedShuffleSplit
@@ -26,6 +24,12 @@ from app.servicios.drive_service import (
     respaldar_modelo_en_drive,
     descargar_videos_temporalmente,
     limpiar_carpeta_temporal
+)
+from app.servicios.extractor_secuencias import (
+    extraer_secuencia_landmarks,
+    secuencia_desde_keypoints,
+    ResultadoSecuencia,
+    VERSION_SECUENCIAS,
 )
 from app.modelos.entrenamiento import ModeloIA
 from app.modelos.modelo_adaptativo import ModeloAdaptativoSenas
@@ -37,11 +41,11 @@ from app.servicios.config_tipo_senas import (
     validar_consistencia_categoria,
     es_categoria_alfabeto,
     calcular_factor_confusion_mejorado,
-    redimensionar_manteniendo_aspecto
 )
 from app.utilidades.augmentation_inteligente import (
     crear_sampler_balanceado,
-    obtener_parametros_entrenamiento_optimizados
+    obtener_parametros_entrenamiento_optimizados,
+    validar_configuracion_dataset,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,188 +53,154 @@ logger = logging.getLogger(__name__)
 progresos_entrenamiento: Dict[str, Any] = {}
 _lock_progresos = Lock()
 
+SEED_ENTRENAMIENTO = 42
+
+
+def _fijar_semillas(seed: int = SEED_ENTRENAMIENTO) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 
 class AumentadorKeypoints:
 
     @staticmethod
-    def ruido(keypoints: np.ndarray, factor: float = 0.01) -> np.ndarray:
-        return np.clip(keypoints + np.random.normal(0, factor, keypoints.shape), 0, 1)
+    def _slots_presentes(frame: np.ndarray) -> List[int]:
+        return [i for i in range(2) if np.any(frame[i * 63:(i + 1) * 63] != 0)]
 
     @staticmethod
-    def escala(keypoints: np.ndarray, rango: Tuple[float, float] = (0.95, 1.05)) -> np.ndarray:
-        factor = np.random.uniform(*rango)
-        resultado = keypoints.copy()
-        for i in range(2):
-            inicio, fin = i * 63, i * 63 + 63
-            mano = resultado[inicio:fin].reshape(21, 3)
-            centroide = mano[:, :2].mean(axis=0)
-            mano[:, :2] = (mano[:, :2] - centroide) * factor + centroide
-            resultado[inicio:fin] = mano.flatten()
-        return np.clip(resultado, 0, 1)
+    def aplicar_espacial(secuencia: np.ndarray,
+                         cos_a: float, sin_a: float,
+                         factor_esc: float,
+                         off_x: float, off_y: float,
+                         factor_ruido: float) -> np.ndarray:
+        resultado = secuencia.copy()
+        for i in range(len(resultado)):
+            frame = resultado[i]
+            for slot in AumentadorKeypoints._slots_presentes(frame):
+                inicio, fin = slot * 63, slot * 63 + 63
+                mano = frame[inicio:fin].reshape(21, 3).copy()
+
+                x = mano[:, 0].copy()
+                y = mano[:, 1].copy()
+                mano[:, 0] = x * cos_a - y * sin_a
+                mano[:, 1] = x * sin_a + y * cos_a
+
+                if factor_esc != 1.0:
+                    centroide = mano[:, :2].mean(axis=0)
+                    mano[:, :2] = (mano[:, :2] - centroide) * factor_esc + centroide
+
+                mano[:, 0] += off_x
+                mano[:, 1] += off_y
+
+                mano += np.random.normal(0, factor_ruido, mano.shape).astype(np.float32)
+
+                frame[inicio:fin] = mano.flatten()
+            resultado[i] = frame
+        return resultado
 
     @staticmethod
-    def traslacion(keypoints: np.ndarray, rango: float = 0.03) -> np.ndarray:
-        offset_x = np.random.uniform(-rango, rango)
-        offset_y = np.random.uniform(-rango, rango)
-        resultado = keypoints.copy()
-        for i in range(2):
-            inicio, fin = i * 63, i * 63 + 63
-            mano = resultado[inicio:fin].reshape(21, 3)
-            mano[:, 0] += offset_x
-            mano[:, 1] += offset_y
-            resultado[inicio:fin] = mano.flatten()
-        return np.clip(resultado, 0, 1)
+    def aplicar_escala_z(secuencia: np.ndarray, factor_z: float) -> np.ndarray:
+        """
+        La normalización (_normalizar_mano) escala x,y por la distancia
+        muñeca->nudillo, pero deja z sin tocar. Esto simula que la mano esté
+        más cerca o más lejos de la cámara sin que cambie la seña en sí.
+        """
+        resultado = secuencia.copy()
+        for i in range(len(resultado)):
+            frame = resultado[i]
+            for slot in AumentadorKeypoints._slots_presentes(frame):
+                inicio, fin = slot * 63, slot * 63 + 63
+                mano = frame[inicio:fin].reshape(21, 3).copy()
+                mano[:, 2] *= factor_z
+                frame[inicio:fin] = mano.flatten()
+            resultado[i] = frame
+        return resultado
 
+    @staticmethod
+    def simular_deteccion_imperfecta(secuencia: np.ndarray, max_landmarks_afectados: int = 2) -> np.ndarray:
+        """
+        Degrada 1-2 landmarks en un subconjunto de frames, como si MediaPipe
+        los hubiera detectado con ruido (mano cerca del borde del encuadre,
+        oclusión parcial, mala luz). El modelo real va a encontrarse con esto
+        en producción aunque el dataset grabado no lo tenga.
+        """
+        resultado = secuencia.copy()
+        num_frames = len(resultado)
+        n_frames_afectados = max(1, num_frames // 4)
+        frames_afectados = np.random.choice(num_frames, size=n_frames_afectados, replace=False)
 
-def calcular_intensidad_augmentation(config: Dict[str, Any]) -> float:
-    if config.get('es_emergencia', False):
-        base = 0.2
-    elif config.get('es_confusion_numerica', False):
-        base = 0.25
-    elif config.get('es_confusa', False):
-        base = 0.35
-    else:
-        base = 0.5
-
-    rotacion = config.get('augmentation_rotation', 10)
-    brillo_min, brillo_max = config.get('augmentation_brightness', (0.8, 1.2))
-    amplitud_brillo = max(0.0, brillo_max - brillo_min)
-
-    factor_rotacion = min(1.0, rotacion / 20.0)
-    factor_brillo = min(1.0, amplitud_brillo / 0.6)
-    variacion = (factor_rotacion + factor_brillo) / 2.0
-
-    intensidad = base * (0.6 + 0.4 * variacion)
-    return max(0.15, min(0.75, intensidad))
+        for i in frames_afectados:
+            frame = resultado[i]
+            for slot in AumentadorKeypoints._slots_presentes(frame):
+                inicio, fin = slot * 63, slot * 63 + 63
+                mano = frame[inicio:fin].reshape(21, 3).copy()
+                n_afectados = random.randint(1, max_landmarks_afectados)
+                indices = np.random.choice(21, size=n_afectados, replace=False)
+                mano[indices] += np.random.normal(0, 0.05, (n_afectados, 3)).astype(np.float32)
+                frame[inicio:fin] = mano.flatten()
+            resultado[i] = frame
+        return resultado
 
 
 def aplicar_augmentation_keypoints(secuencia: np.ndarray, config: Dict, es_entrenamiento: bool) -> np.ndarray:
     if not es_entrenamiento:
         return secuencia
 
-    prob_base = calcular_intensidad_augmentation(config)
-
     resultado = secuencia.copy()
-    for i in range(len(resultado)):
-        if random.random() < prob_base:
-            resultado[i] = AumentadorKeypoints.ruido(resultado[i])
-        if random.random() < prob_base * 0.7:
-            resultado[i] = AumentadorKeypoints.escala(resultado[i])
-        if random.random() < prob_base * 0.5:
-            resultado[i] = AumentadorKeypoints.traslacion(resultado[i])
+
+    rotacion_max = float(config.get('augmentation_rotation', 8.0))
+    permite_zoom = config.get('permite_zoom', True)
+    permite_flip = config.get('permite_flip', True)
+
+    if random.random() < 0.9:
+        grados = np.random.uniform(-rotacion_max, rotacion_max)
+        angulo = np.deg2rad(grados)
+        cos_a, sin_a = float(np.cos(angulo)), float(np.sin(angulo))
+
+        factor_esc = float(np.random.uniform(0.85, 1.15)) if (permite_zoom and random.random() < 0.8) else 1.0
+        # Offsets más amplios que antes (±0.04 -> ±0.08): antes solo cubrían
+        # micro-ajustes; esto simula mejor que la mano caiga en otra zona
+        # del encuadre relativa a su propia muñeca.
+        off_x = float(np.random.uniform(-0.08, 0.08)) if random.random() < 0.7 else 0.0
+        off_y = float(np.random.uniform(-0.08, 0.08)) if random.random() < 0.7 else 0.0
+        factor_ruido = 0.015
+
+        resultado = AumentadorKeypoints.aplicar_espacial(
+            resultado, cos_a, sin_a, factor_esc, off_x, off_y, factor_ruido
+        )
+
+    # Variación de profundidad: mano más cerca/lejos de la cámara.
+    if random.random() < 0.5:
+        factor_z = float(np.random.uniform(0.8, 1.25))
+        resultado = AumentadorKeypoints.aplicar_escala_z(resultado, factor_z)
+
+    # Ruido de detección tipo "borde de cámara / oclusión parcial".
+    if random.random() < 0.3:
+        resultado = AumentadorKeypoints.simular_deteccion_imperfecta(resultado)
+
     return resultado
 
 
 class DatasetKeypointsAdaptativo(Dataset):
 
-    def __init__(self, video_paths: List[str], labels: List[int], senas: List[str],
+    def __init__(self, secuencias: List[np.ndarray], labels: List[int], senas: List[str],
                  num_frames: int = 20, es_entrenamiento: bool = True):
-        if not (len(video_paths) == len(labels) == len(senas)):
-            raise ValueError("video_paths, labels y senas deben tener el mismo tamaño")
+        if not (len(secuencias) == len(labels) == len(senas)):
+            raise ValueError("secuencias, labels y senas deben tener el mismo tamaño")
 
-        self.video_paths = video_paths
+        self.secuencias = secuencias
         self.labels = labels
         self.senas = senas
         self.num_frames = num_frames
         self.es_entrenamiento = es_entrenamiento
         self.tipos = [detectar_tipo_sena(s) for s in senas]
         self.configs = [obtener_config_sena(s) for s in senas]
-        self.mp_hands = mp.solutions.hands.Hands(
-            static_image_mode=False,
-            max_num_hands=2,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
-
-        logger.info(f"Precomputando keypoints de {len(video_paths)} videos (una sola vez)...")
-        self.cache_keypoints: List[np.ndarray] = []
-        for i, video_path in enumerate(self.video_paths):
-            secuencia = self._cargar_keypoints(video_path, self.num_frames, self.tipos[i])
-            self.cache_keypoints.append(secuencia)
-            if (i + 1) % 10 == 0:
-                logger.info(f"  Precomputados {i + 1}/{len(video_paths)} videos")
-        logger.info("Precomputo de keypoints completado")
-
-        self.mp_hands.close()
 
     def __len__(self):
-        return len(self.video_paths)
-
-    def _extraer_keypoints(self, frame: np.ndarray) -> Optional[np.ndarray]:
-        try:
-            resultado = self.mp_hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            if not resultado.multi_hand_landmarks or not resultado.multi_handedness:
-                return None
-
-            manos = {'Right': None, 'Left': None}
-            for landmarks, handedness in zip(resultado.multi_hand_landmarks, resultado.multi_handedness):
-                etiqueta = handedness.classification[0].label
-                valores = []
-                for punto in landmarks.landmark:
-                    valores.extend([punto.x, punto.y, punto.z])
-                if len(valores) == 63:
-                    manos[etiqueta] = valores
-
-            mano_derecha = manos['Right'] if manos['Right'] is not None else [0.0] * 63
-            mano_izquierda = manos['Left'] if manos['Left'] is not None else [0.0] * 63
-            keypoints = mano_derecha + mano_izquierda
-
-            if len(keypoints) != 126:
-                return None
-
-            return np.array(keypoints, dtype=np.float32)
-        except Exception:
-            return None
-
-    def _cargar_keypoints(self, video_path: str, num_frames: int, tipo: str) -> np.ndarray:
-        cap = None
-        try:
-            if not os.path.exists(video_path):
-                return np.zeros((num_frames, 126), dtype=np.float32)
-
-            cap = cv2.VideoCapture(str(video_path))
-            if not cap.isOpened():
-                return np.zeros((num_frames, 126), dtype=np.float32)
-
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            if total_frames <= 0:
-                return np.zeros((num_frames, 126), dtype=np.float32)
-
-            if tipo == 'ESTATICA':
-                centro = total_frames // 2
-                ventana = num_frames // 2
-                inicio = max(0, centro - ventana)
-                fin = min(total_frames, centro + ventana)
-                indices = np.linspace(inicio, max(fin - 1, inicio), num_frames, dtype=int)
-            else:
-                if total_frames <= num_frames:
-                    indices = np.arange(total_frames)
-                else:
-                    indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
-            indices = np.unique(indices)
-
-            secuencia = []
-            for idx in indices:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
-                ok, frame = cap.read()
-                if ok and frame is not None:
-                    frame = redimensionar_manteniendo_aspecto(frame, (224, 224))
-                    keypoints = self._extraer_keypoints(frame)
-                    secuencia.append(keypoints if keypoints is not None else
-                                      (secuencia[-1].copy() if secuencia else np.zeros(126, dtype=np.float32)))
-                else:
-                    secuencia.append(secuencia[-1].copy() if secuencia else np.zeros(126, dtype=np.float32))
-
-            while len(secuencia) < num_frames:
-                secuencia.append(secuencia[-1].copy() if secuencia else np.zeros(126, dtype=np.float32))
-
-            return np.array(secuencia[:num_frames], dtype=np.float32)
-        except Exception as e:
-            logger.error(f"Error cargando keypoints de {video_path}: {e}")
-            return np.zeros((num_frames, 126), dtype=np.float32)
-        finally:
-            if cap is not None:
-                cap.release()
+        return len(self.secuencias)
 
     def __getitem__(self, idx):
         label = self.labels[idx]
@@ -238,7 +208,7 @@ class DatasetKeypointsAdaptativo(Dataset):
         config = self.configs[idx]
 
         try:
-            secuencia = self.cache_keypoints[idx].copy()
+            secuencia = self.secuencias[idx].copy()
 
             if secuencia.shape[0] != self.num_frames:
                 if secuencia.shape[0] < self.num_frames:
@@ -246,26 +216,24 @@ class DatasetKeypointsAdaptativo(Dataset):
                     relleno = np.tile(ultimo, (self.num_frames - secuencia.shape[0], 1))
                     secuencia = np.vstack([secuencia, relleno])
                 else:
-                    secuencia = secuencia[:self.num_frames]
+                    indices = np.linspace(0, secuencia.shape[0] - 1, self.num_frames).round().astype(int)
+                    secuencia = secuencia[indices]
 
             secuencia = aplicar_augmentation_keypoints(secuencia, config, self.es_entrenamiento)
 
             tensor_keypoints = torch.from_numpy(secuencia.copy()).float()
             tensor_label = torch.tensor(label, dtype=torch.long)
-
-            if tensor_keypoints.shape != (self.num_frames, 126):
-                raise ValueError(f"Shape inválido: {tensor_keypoints.shape}")
-
             return tensor_keypoints, tensor_label, tipo
         except Exception as e:
             logger.error(f"Error procesando índice {idx}: {e}")
             return (torch.zeros((self.num_frames, 126), dtype=torch.float32),
                     torch.tensor(0, dtype=torch.long), 'DINAMICA')
 
+
 class PerdidaContrastivaFocal(nn.Module):
 
-    def __init__(self, clases: List[str], alpha: float = 1.0, gamma: float = 2.0,
-                 label_smoothing: float = 0.1):
+    def __init__(self, clases: List[str], alpha: float = 1.0, gamma: float = 1.5,
+                 label_smoothing: float = 0.02):
         super().__init__()
         self.clases = clases
         self.alpha = alpha
@@ -285,9 +253,12 @@ class PerdidaContrastivaFocal(nn.Module):
         for i in range(len(targets)):
             objetivo_idx = targets[i].item()
             predicho_idx = predicted[i].item()
-            if objetivo_idx != predicho_idx and objetivo_idx < len(self.clases) and predicho_idx < len(self.clases):
+            if (objetivo_idx != predicho_idx
+                    and objetivo_idx < len(self.clases)
+                    and predicho_idx < len(self.clases)):
                 factor = calcular_factor_confusion_mejorado(
-                    self.clases[objetivo_idx].upper(), self.clases[predicho_idx].upper()
+                    self.clases[objetivo_idx].upper(),
+                    self.clases[predicho_idx].upper()
                 )
                 penalizaciones[i] = factor
 
@@ -299,27 +270,30 @@ class ServicioEntrenamientoUnificado:
     def __init__(self):
         self.modelo_dir = Path('modelos_entrenados')
         self.modelo_dir.mkdir(exist_ok=True)
+        self.secuencias_dir = Path("archivos_subidos") / "secuencias_dataset"
+        self.secuencias_dir.mkdir(parents=True, exist_ok=True)
         self.device, self.gpu_info = self._detectar_y_configurar_gpu()
         self.batch_size, self.num_frames, self.num_workers = self._configurar_recursos()
         self.weight_decay = 1e-4
-        self.min_videos_por_sena = 8
-        self.min_accuracy = 0.50
-        self.frames_estaticos_modelo = 8
-        logger.info(f"Servicio inicializado en {self.device}, batch_size={self.batch_size}, frames={self.num_frames}")
+        # Optimizado para datasets pequeños (ej: 50 videos por clase)
+        self.min_videos_por_sena = 25  # Reducido de 30 a 25 para su escala
+        self.min_accuracy = 0.65      # Ligeramente más exigente para conjunto pequeño
+        self.min_accuracy_por_clase = 0.55  # umbral de aviso: si una clase baja de esto, se avisa explícitamente
+        self.frames_estaticos_modelo = 12  # Más frames para mejor precisión
+        # Parámetros optimizados para su escala específica
+        self.learning_rate_base = 0.0008
+        self.epochs_base = 250
+        logger.info(f"Servicio optimizado para 50 videos/clase: batch_size={self.batch_size}, min_sena_videos={self.min_videos_por_sena}, epochs={self.epochs_base}")
 
     def _configurar_recursos(self) -> Tuple[int, int, int]:
         import platform
         num_workers = 0 if platform.system() == 'Windows' else 2
-
         if not torch.cuda.is_available():
-            return 4, 20, 0
-
+            return 8, 20, 0
         memoria_gpu = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
         if memoria_gpu >= 8:
             return 8, 20, num_workers
-        if memoria_gpu >= 6:
-            return 6, 20, num_workers
-        return 4, 20, num_workers
+        return 6, 20, num_workers
 
     def _detectar_y_configurar_gpu(self) -> Tuple[torch.device, Optional[Dict[str, Any]]]:
         if not torch.cuda.is_available():
@@ -342,11 +316,17 @@ class ServicioEntrenamientoUnificado:
     def generar_nombre_modelo(self) -> str:
         return f"modelo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-    def _obtener_videos_utilizables(self, categoria_ids: List[int], db: Session) -> List[VideoDataset]:
-        return db.query(VideoDataset).filter(
+    def _obtener_videos_utilizables(self, categoria_ids: List[int], db: Session) -> List[Dict[str, Any]]:
+        filas = db.query(
+            VideoDataset.id, VideoDataset.sena,
+            VideoDataset.ruta_video, VideoDataset.drive_file_id,
+        ).filter(
             VideoDataset.aprobado == True,
             VideoDataset.categoria_id.in_(categoria_ids)
         ).all()
+
+        return [{"id": int(f.id), "sena": f.sena or "sin_clasificar",
+                 "ruta_video": f.ruta_video, "drive_file_id": f.drive_file_id} for f in filas]
 
     def validar_dataset_entrenamiento(self, categoria_ids: List[int], db: Session) -> Dict[str, Any]:
         try:
@@ -354,13 +334,18 @@ class ServicioEntrenamientoUnificado:
 
             videos_validos, videos_no_encontrados = [], []
             for video in videos_db:
-                tiene_local = bool(video.ruta_video and os.path.exists(video.ruta_video))
-                tiene_drive = bool(video.drive_file_id)
-                (videos_validos if tiene_local or tiene_drive else videos_no_encontrados).append(video)
+                tiene_local = bool(video["ruta_video"] and os.path.exists(video["ruta_video"]))
+                tiene_drive = bool(video["drive_file_id"])
+                tiene_kp_cliente = self._cargar_keypoints_cliente(video["id"]) is not None
+                tiene_secuencia = (self.secuencias_dir / f"{video['id']}.npz").exists()
+                if tiene_local or tiene_drive or tiene_kp_cliente or tiene_secuencia:
+                    videos_validos.append(video)
+                else:
+                    videos_no_encontrados.append(video)
 
             videos_por_sena: Dict[str, List] = {}
             for video in videos_validos:
-                videos_por_sena.setdefault(video.sena or "sin_clasificar", []).append(video)
+                videos_por_sena.setdefault(video["sena"], []).append(video)
 
             senas_con_minimo = [s for s, v in videos_por_sena.items() if len(v) >= self.min_videos_por_sena]
             senas_sin_minimo = [s for s in videos_por_sena if s not in senas_con_minimo]
@@ -370,11 +355,16 @@ class ServicioEntrenamientoUnificado:
             consistencia = validar_consistencia_categoria(list(videos_por_sena.keys()))
             es_alfabeto = es_categoria_alfabeto(list(videos_por_sena.keys()))
             total_videos = len(videos_validos)
-            valido = total_videos >= 20 and len(senas_con_minimo) >= 2
+
+            # Validación optimizada para su escala (50 videos/clase)
+            valido = (
+                total_videos >= 40 and  # Reducido de 20 a 40 para mejor entrenamiento
+                len(senas_con_minimo) >= 2 and
+                len(senas_sin_minimo) == 0
+            )
 
             return {
-                "valido": valido,
-                "total_videos": total_videos,
+                "valido": valido, "total_videos": total_videos,
                 "videos_validos": len(videos_validos),
                 "videos_no_encontrados": len(videos_no_encontrados),
                 "total_senas": len(videos_por_sena),
@@ -382,28 +372,21 @@ class ServicioEntrenamientoUnificado:
                 "senas_sin_minimo": senas_sin_minimo,
                 "senas_estaticas": senas_estaticas,
                 "senas_dinamicas": senas_dinamicas,
-                "distribucion": {
-                    "estaticas": len(senas_estaticas),
-                    "dinamicas": len(senas_dinamicas),
-                    "tipo_predominante": consistencia.get('tipo_mayoritario')
-                },
-                "consistencia": consistencia,
-                "es_categoria_alfabeto": es_alfabeto,
-                "minimo_videos_requerido": 20,
-                "minimo_senas_requerido": 2,
+                "distribucion": {"estaticas": len(senas_estaticas), "dinamicas": len(senas_dinamicas),
+                                 "tipo_predominante": consistencia.get('tipo_mayoritario')},
+                "consistencia": consistencia, "es_categoria_alfabeto": es_alfabeto,
+                "minimo_videos_requerido": 40, "minimo_senas_requerido": 2,
                 "minimo_videos_por_sena": self.min_videos_por_sena,
                 "cumple_requisitos": {
-                    "videos_totales": total_videos >= 20,
+                    "videos_totales": total_videos >= 40,
                     "senas_suficientes": len(senas_con_minimo) >= 2,
                     "videos_por_sena": len(senas_sin_minimo) == 0
                 }
             }
         except Exception as e:
             logger.error(f"Error validando dataset: {e}")
-            return {
-                "valido": False, "error": str(e), "total_videos": 0, "videos_validos": 0,
-                "total_senas": 0, "senas_con_minimo": [], "senas_sin_minimo": []
-            }
+            return {"valido": False, "error": str(e), "total_videos": 0, "videos_validos": 0,
+                    "total_senas": 0, "senas_con_minimo": [], "senas_sin_minimo": []}
 
     def _progreso_por_defecto(self, nombre_modelo: str, estado: str, mensaje: str, entrenando: bool) -> Dict[str, Any]:
         return {
@@ -411,32 +394,34 @@ class ServicioEntrenamientoUnificado:
             "epoch_actual": 0, "total_epochs": 0, "accuracy": 0.0, "loss": 0.0,
             "train_loss": 0.0, "train_accuracy": 0.0, "num_clases": 0, "clases": [],
             "total_videos": 0, "frames_procesados": 0, "total_frames": 0,
-            "mensaje": mensaje, "entrenando": entrenando
+            "mensaje": mensaje, "entrenando": entrenando, "advertencias_dataset": [],
+            "accuracy_por_clase": {},
         }
 
     def obtener_progreso_entrenamiento(self, nombre_modelo: str) -> Dict[str, Any]:
         with _lock_progresos:
             if nombre_modelo in progresos_entrenamiento:
-                progreso = progresos_entrenamiento[nombre_modelo]
+                p = progresos_entrenamiento[nombre_modelo]
                 return {
-                    "nombre_modelo": progreso.get("nombre_modelo", nombre_modelo),
-                    "estado": progreso.get("estado", "desconocido"),
-                    "progreso": progreso.get("progreso", 0.0),
-                    "epoch_actual": progreso.get("epoch_actual", 0),
-                    "total_epochs": progreso.get("total_epochs", 0),
-                    "accuracy": progreso.get("accuracy", 0.0),
-                    "loss": progreso.get("loss", 0.0),
-                    "train_loss": progreso.get("train_loss", 0.0),
-                    "train_accuracy": progreso.get("train_accuracy", 0.0),
-                    "num_clases": progreso.get("num_clases", 0),
-                    "clases": progreso.get("clases", []),
-                    "total_videos": progreso.get("total_videos", 0),
-                    "frames_procesados": progreso.get("frames_procesados", 0),
-                    "total_frames": progreso.get("total_frames", 0),
-                    "mensaje": progreso.get("mensaje", ""),
-                    "fecha_inicio": progreso.get("fecha_inicio", datetime.now().isoformat()),
-                    "entrenando": progreso.get("entrenando", False),
-                    "accuracy_por_clase": progreso.get("accuracy_por_clase", {})
+                    "nombre_modelo": p.get("nombre_modelo", nombre_modelo),
+                    "estado": p.get("estado", "desconocido"),
+                    "progreso": p.get("progreso", 0.0),
+                    "epoch_actual": p.get("epoch_actual", 0),
+                    "total_epochs": p.get("total_epochs", 0),
+                    "accuracy": p.get("accuracy", 0.0),
+                    "loss": p.get("loss", 0.0),
+                    "train_loss": p.get("train_loss", 0.0),
+                    "train_accuracy": p.get("train_accuracy", 0.0),
+                    "num_clases": p.get("num_clases", 0),
+                    "clases": p.get("clases", []),
+                    "total_videos": p.get("total_videos", 0),
+                    "frames_procesados": p.get("frames_procesados", 0),
+                    "total_frames": p.get("total_frames", 0),
+                    "mensaje": p.get("mensaje", ""),
+                    "fecha_inicio": p.get("fecha_inicio", datetime.now().isoformat()),
+                    "entrenando": p.get("entrenando", False),
+                    "accuracy_por_clase": p.get("accuracy_por_clase", {}),
+                    "advertencias_dataset": p.get("advertencias_dataset", [])
                 }
 
         db = SessionLocal()
@@ -444,7 +429,6 @@ class ServicioEntrenamientoUnificado:
             modelo_db = db.query(ModeloIA).filter(ModeloIA.nombre == nombre_modelo).first()
             if not modelo_db:
                 return self._progreso_por_defecto(nombre_modelo, "preparando", "Inicializando entrenamiento...", True)
-
             clases = json.loads(modelo_db.clases_json) if modelo_db.clases_json else []
             return {
                 "nombre_modelo": modelo_db.nombre,
@@ -474,34 +458,143 @@ class ServicioEntrenamientoUnificado:
             if nombre_modelo in progresos_entrenamiento:
                 progresos_entrenamiento[nombre_modelo].update(campos)
 
-    def _preparar_videos(self, categoria_ids: List[int], db: Session, nombre_modelo: str) -> List[VideoDataset]:
-        videos_db = self._obtener_videos_utilizables(categoria_ids, db)
-        videos_locales = [v for v in videos_db if v.ruta_video and os.path.exists(v.ruta_video)]
-        videos_solo_drive = [v for v in videos_db if v.drive_file_id and v not in videos_locales]
+    def _ajustar_longitud(self, secuencia: np.ndarray) -> np.ndarray:
+        if secuencia.shape[0] == self.num_frames:
+            return secuencia
+        indices = np.linspace(0, secuencia.shape[0] - 1, self.num_frames).round().astype(int)
+        return secuencia[indices]
 
-        self._actualizar_progreso(nombre_modelo, mensaje=f"Descargando {len(videos_solo_drive)} videos desde Drive...")
+    def _leer_secuencia_guardada(self, video_id: int) -> Tuple[bool, Optional[np.ndarray]]:
+        ruta = self.secuencias_dir / f"{video_id}.npz"
+        if not ruta.exists():
+            return False, None
+        try:
+            datos = np.load(ruta)
+            secuencia = datos["secuencia"]
+            estado = datos["estado"]
+            version = int(datos["version"]) if "version" in datos else 0
+        except Exception as e:
+            logger.warning(f"Secuencia ilegible {ruta.name}: {e}")
+            return False, None
 
-        rutas_temporales = {}
-        if videos_solo_drive:
-            rutas_temporales = descargar_videos_temporalmente(
-                videos_solo_drive, carpeta_temporal=f"temp_entrenamiento_{nombre_modelo}"
+        if version != VERSION_SECUENCIAS:
+            return False, None
+        if secuencia.ndim != 2 or secuencia.shape[1] != 126 or secuencia.shape[0] == 0:
+            return False, None
+        if not (estado > 0).any():
+            return True, None
+        return True, self._ajustar_longitud(secuencia.astype(np.float32))
+
+    def _guardar_secuencia(self, video_id: int, resultado: ResultadoSecuencia) -> None:
+        try:
+            np.savez_compressed(
+                self.secuencias_dir / f"{video_id}.npz",
+                secuencia=resultado.secuencia, estado=resultado.estado,
+                version=np.array(VERSION_SECUENCIAS),
             )
+        except Exception as e:
+            logger.warning(f"No se pudo guardar secuencia {video_id}: {e}")
 
-        videos_validos = list(videos_locales)
-        for v in videos_solo_drive:
-            if v.id in rutas_temporales:
-                v.ruta_video = rutas_temporales[v.id]
-                videos_validos.append(v)
+    def _cargar_keypoints_cliente(self, video_id: int) -> Optional[list]:
+        ruta = self.secuencias_dir / f"{video_id}_kp_cliente.npz"
+        if not ruta.exists():
+            return None
+        try:
+            return list(np.load(ruta)["keypoints"])
+        except Exception as e:
+            logger.warning(f"No se pudo leer kp cliente {video_id}: {e}")
+            return None
 
-        if len(videos_validos) < 20:
-            raise Exception(f"Insuficientes videos: {len(videos_validos)} (mínimo 20)")
+    def _preparar_secuencias(self, categoria_ids: List[int], nombre_modelo: str) -> Tuple[List[np.ndarray], List[str]]:
+        db = SessionLocal()
+        try:
+            videos = self._obtener_videos_utilizables(categoria_ids, db)
+        finally:
+            db.close()
 
-        return videos_validos
+        logger.info(f"Videos aprobados a procesar: {len(videos)}")
+
+        secuencias: List[np.ndarray] = []
+        senas: List[str] = []
+        pendientes: List[Dict[str, Any]] = []
+
+        for v in videos:
+            existe, secuencia = self._leer_secuencia_guardada(v["id"])
+            if existe:
+                if secuencia is not None:
+                    secuencias.append(secuencia)
+                    senas.append(v["sena"])
+                continue
+            pendientes.append(v)
+
+        logger.info(f"Secuencias en disco: {len(secuencias)} | por generar: {len(pendientes)}")
+
+        if not pendientes:
+            return secuencias, senas
+
+        # Validar si suficientes videos para su escala (50 videos/clase)
+        videos_por_sena = {}
+        for v in videos:
+            videos_por_sena[v["sena"]] = videos_por_sena.get(v["sena"], 0) + 1
+
+        senas_validas = [s for s, count in videos_por_sena.items() if count >= self.min_videos_por_sena]
+        if len(senas_validas) < 2:
+            logger.warning(f"Advertencia: Solo {len(senas_validas)} señas cumplen mínimo ({self.min_videos_por_sena} videos/clase)")
+            logger.warning(f"Distribución: {videos_por_sena}")
+
+        con_kp_cliente: Dict[int, list] = {}
+        sin_kp: List[Dict[str, Any]] = []
+        for v in pendientes:
+            kp = self._cargar_keypoints_cliente(v["id"])
+            if kp is not None:
+                con_kp_cliente[v["id"]] = kp
+            else:
+                sin_kp.append(v)
+
+        locales = {v["id"]: v["ruta_video"] for v in sin_kp
+                   if v["ruta_video"] and os.path.exists(v["ruta_video"])}
+        ids_sin_kp = {v["id"] for v in sin_kp}
+        solo_drive = [v for v in videos if v["id"] in ids_sin_kp
+                      and v["id"] not in locales and v["drive_file_id"]]
+
+        rutas_temporales: Dict[int, str] = {}
+        if solo_drive:
+            self._actualizar_progreso(nombre_modelo, mensaje=f"Descargando {len(solo_drive)} videos desde Drive...")
+            rutas_temporales = descargar_videos_temporalmente(solo_drive, carpeta_temporal=f"temp_entrenamiento_{nombre_modelo}")
+
+        for i, v in enumerate(pendientes):
+            video_id = v["id"]
+            sena = v["sena"]
+            self._actualizar_progreso(nombre_modelo, mensaje=f"Extrayendo secuencias {i + 1}/{len(pendientes)}...")
+
+            if video_id in con_kp_cliente:
+                arrs = [np.asarray(k, dtype=np.float32) for k in con_kp_cliente[video_id]]
+                resultado = secuencia_desde_keypoints(arrs, self.num_frames)
+            else:
+                ruta = locales.get(video_id) or rutas_temporales.get(video_id)
+                if not ruta:
+                    continue
+                resultado = extraer_secuencia_landmarks(ruta, self.num_frames)
+                if resultado is None:
+                    logger.warning(f"Video {video_id} ilegible, se omite")
+                    continue
+
+            self._guardar_secuencia(video_id, resultado)
+
+            if (resultado.estado > 0).any():
+                secuencias.append(resultado.secuencia)
+                senas.append(sena)
+
+        if len(secuencias) < 20:
+            raise Exception(f"Insuficientes videos: {len(secuencias)} (mínimo 20)")
+
+        logger.info(f"Dataset preparado: {len(secuencias)} secuencias, {len(set(senas))} señas únicas")
+        return secuencias, senas
 
     def entrenar(self, nombre_modelo: str, categoria_ids: List[int], epochs: int):
-        epochs = 150 if not epochs or epochs <= 0 else min(epochs, 500)
+        _fijar_semillas()
 
-        db = model = train_loader = val_loader = None
+        model = train_loader = val_loader = None
         try:
             with _lock_progresos:
                 progresos_entrenamiento[nombre_modelo] = {
@@ -514,50 +607,84 @@ class ServicioEntrenamientoUnificado:
                 torch.cuda.empty_cache()
                 gc.collect()
 
-            db = SessionLocal()
-            videos_validos = self._preparar_videos(categoria_ids, db, nombre_modelo)
+            secuencias_todas, senas_todas = self._preparar_secuencias(categoria_ids, nombre_modelo)
 
-            self._actualizar_progreso(
-                nombre_modelo, estado="preparando_datos",
-                mensaje="Preparando dataset...", total_videos=len(videos_validos)
-            )
+            self._actualizar_progreso(nombre_modelo, estado="preparando_datos",
+                                       mensaje="Preparando dataset...", total_videos=len(secuencias_todas))
 
-            videos_por_sena: Dict[str, List] = {}
-            for video in videos_validos:
-                videos_por_sena.setdefault(video.sena or "sin_clasificar", []).append(video)
+            indices_por_sena: Dict[str, List[int]] = {}
+            for i, sena in enumerate(senas_todas):
+                indices_por_sena.setdefault(sena, []).append(i)
 
-            senas_validas = {k: v for k, v in videos_por_sena.items() if len(v) >= self.min_videos_por_sena}
+            senas_validas = {k: v for k, v in indices_por_sena.items() if len(v) >= self.min_videos_por_sena}
             if len(senas_validas) < 2:
-                raise Exception(
-                    f"Se necesitan al menos 2 señas con {self.min_videos_por_sena}+ videos. "
-                    f"Señas válidas: {list(senas_validas.keys())}"
-                )
+                raise Exception(f"Se necesitan al menos 2 señas con {self.min_videos_por_sena}+ videos. "
+                                f"Señas válidas: {list(senas_validas.keys())}")
 
             clases = sorted(senas_validas.keys())
             clase_a_idx = {clase: i for i, clase in enumerate(clases)}
             tipos_senas = {clase: detectar_tipo_sena(clase) for clase in clases}
 
-            video_paths, labels, senas_list = [], [], []
-            for clase, videos_clase in senas_validas.items():
-                for video in videos_clase:
-                    video_paths.append(video.ruta_video)
+            videos_por_clase = {clase: len(indices) for clase, indices in senas_validas.items()}
+            validacion = validar_configuracion_dataset(clases, videos_por_clase)
+            if validacion['advertencias']:
+                logger.info(f"Advertencias: {validacion['advertencias']}")
+
+            self._actualizar_progreso(nombre_modelo,
+                                       advertencias_dataset=validacion['problemas'] + validacion['advertencias'])
+
+            secuencias, labels, senas_list = [], [], []
+            for clase, indices in senas_validas.items():
+                for i in indices:
+                    secuencias.append(secuencias_todas[i])
                     labels.append(clase_a_idx[clase])
                     senas_list.append(clase)
 
-            total_videos = len(video_paths)
+            total_videos = len(secuencias)
             total_frames = total_videos * self.num_frames
+
+            # Para su escala específica (50 videos/clase, pocas letras):
+            # obtener hiperparámetros afinados para dataset pequeño / pocas clases
+            parametros = obtener_parametros_entrenamiento_optimizados(clases)
+
+            if not epochs or epochs <= 0:
+                # Solo se calcula un valor automático si NO llegó nada válido
+                # del frontend. Si el usuario pidió un número específico
+                # (p. ej. 50), se respeta tal cual, sin imponerle un piso.
+                epochs = parametros.get('epochs', self.epochs_base)
+                logger.info(f"No llegó un número de épocas válido desde la solicitud; "
+                            f"se usa el valor calculado automáticamente: {epochs}")
+            else:
+                epochs = int(epochs)
+
+            epochs = max(5, min(epochs, 500))  # solo evita valores absurdos (0, negativos, miles)
+
+            lr = float(parametros.get('learning_rate', self.learning_rate_base))
+            patience = int(parametros.get('patience', 40))
+            focal_gamma = float(parametros.get('focal_gamma', 1.8))
+            label_smoothing = float(parametros.get('label_smoothing', 0.015))
+
+            # El batch_size real nunca debe superar lo que soporta la GPU detectada,
+            # pero para pocas clases/pocos videos conviene el valor más chico que
+            # sugieren los parámetros optimizados (mejor señal de gradiente por paso).
+            batch_size_entrenamiento = min(self.batch_size, int(parametros.get('batch_size', self.batch_size)))
+
+            logger.info(f"Hiperparámetros: lr={lr}, epochs={epochs}, patience={patience}, "
+                        f"batch_size={batch_size_entrenamiento}, focal_gamma={focal_gamma}, "
+                        f"label_smoothing={label_smoothing}")
 
             self._actualizar_progreso(
                 nombre_modelo, num_clases=len(clases), clases=clases,
                 total_videos=total_videos, total_frames=total_frames,
-                estado="cargando_datos", mensaje=f"Extrayendo keypoints de {total_videos} videos..."
+                total_epochs=epochs,
+                estado="cargando_datos", mensaje=f"Preparando {total_videos} secuencias..."
             )
 
             sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
-            train_idx, val_idx = next(sss.split(video_paths, labels))
+            train_idx, val_idx = next(sss.split(np.arange(total_videos), labels))
 
-            train_paths = [video_paths[i] for i in train_idx]
-            val_paths = [video_paths[i] for i in val_idx]
+            train_secuencias = [secuencias[i] for i in train_idx]
+            val_secuencias = [secuencias[i] for i in val_idx]
             train_labels = [labels[i] for i in train_idx]
             val_labels = [labels[i] for i in val_idx]
             train_senas = [senas_list[i] for i in train_idx]
@@ -565,31 +692,28 @@ class ServicioEntrenamientoUnificado:
 
             sampler = crear_sampler_balanceado(train_labels, train_senas, clases)
 
-            train_dataset = DatasetKeypointsAdaptativo(train_paths, train_labels, train_senas, self.num_frames, True)
-            val_dataset = DatasetKeypointsAdaptativo(val_paths, val_labels, val_senas, self.num_frames, False)
+            train_dataset = DatasetKeypointsAdaptativo(train_secuencias, train_labels, train_senas, self.num_frames, True)
+            val_dataset = DatasetKeypointsAdaptativo(val_secuencias, val_labels, val_senas, self.num_frames, False)
 
-            train_loader = DataLoader(
-                train_dataset, batch_size=self.batch_size, sampler=sampler,
-                num_workers=0, drop_last=True
-            )
-            val_loader = DataLoader(
-                val_dataset, batch_size=self.batch_size, shuffle=False,
-                num_workers=0, drop_last=False
-            )
-
-            parametros = obtener_parametros_entrenamiento_optimizados(clases)
-            lr = parametros.get('learning_rate', 0.001)
-            patience = parametros.get('patience', 30)
+            train_loader = DataLoader(train_dataset, batch_size=batch_size_entrenamiento, sampler=sampler,
+                                       num_workers=0, drop_last=True)
+            val_loader = DataLoader(val_dataset, batch_size=batch_size_entrenamiento, shuffle=False,
+                                     num_workers=0, drop_last=False)
 
             self._actualizar_progreso(nombre_modelo, estado="creando_modelo", mensaje="Inicializando modelo...")
 
             model = ModeloAdaptativoSenas(len(clases), tipos_senas, self.frames_estaticos_modelo).to(self.device)
-            criterion = PerdidaContrastivaFocal(clases, alpha=1.0, gamma=parametros.get('focal_gamma', 2.0))
-            optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=self.weight_decay, betas=(0.9, 0.999))
+            n_params = sum(p.numel() for p in model.parameters())
+            logger.info(f"Modelo con {n_params:,} parámetros")
 
-            warmup_epochs = min(15, epochs // 10)
+            criterion = PerdidaContrastivaFocal(clases, alpha=1.0, gamma=focal_gamma,
+                                                 label_smoothing=label_smoothing)
+            optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=self.weight_decay,
+                                     betas=(0.9, 0.999))
+
+            warmup_epochs = max(5, min(20, epochs // 10))
             scheduler = optim.lr_scheduler.OneCycleLR(
-                optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=len(train_loader),
+                optimizer, max_lr=lr, epochs=epochs, steps_per_epoch=max(1, len(train_loader)),
                 pct_start=warmup_epochs / epochs, anneal_strategy='cos'
             )
             scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
@@ -597,6 +721,7 @@ class ServicioEntrenamientoUnificado:
             self._actualizar_progreso(nombre_modelo, estado="entrenando", mensaje="Entrenamiento en progreso...")
 
             best_accuracy = 0.0
+            mejor_score = -1.0
             best_model_state = None
             patience_counter = 0
             matriz_confusion_val = np.zeros((len(clases), len(clases)), dtype=int)
@@ -633,16 +758,13 @@ class ServicioEntrenamientoUnificado:
                         train_total += labels_batch.size(0)
                         train_correct += (predicted == labels_batch).sum().item()
 
-                        frames_procesados = (epoch * len(train_loader) + batch_idx + 1) * self.batch_size * self.num_frames
+                        frames_procesados = (epoch * len(train_loader) + batch_idx + 1) * batch_size_entrenamiento * self.num_frames
                         self._actualizar_progreso(nombre_modelo, frames_procesados=min(frames_procesados, total_frames))
 
                         del keypoints, labels_batch, outputs, loss, predicted
-                        if (batch_idx + 1) % 2 == 0 and torch.cuda.is_available():
-                            torch.cuda.empty_cache()
                     except RuntimeError as e:
                         if "out of memory" not in str(e):
                             raise
-                        logger.error(f"Error de memoria en batch {batch_idx}")
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
                         gc.collect()
@@ -653,59 +775,68 @@ class ServicioEntrenamientoUnificado:
 
                 with torch.no_grad():
                     for keypoints, labels_batch, tipos_batch in val_loader:
-                        try:
-                            keypoints = keypoints.to(self.device, non_blocking=True)
-                            labels_batch = labels_batch.to(self.device, non_blocking=True)
+                        keypoints = keypoints.to(self.device, non_blocking=True)
+                        labels_batch = labels_batch.to(self.device, non_blocking=True)
 
-                            if scaler:
-                                with torch.cuda.amp.autocast():
-                                    outputs = model.forward_batch_mixto(keypoints, tipos_batch)
-                                    loss = criterion(outputs, labels_batch)
-                            else:
+                        if scaler:
+                            with torch.cuda.amp.autocast():
                                 outputs = model.forward_batch_mixto(keypoints, tipos_batch)
                                 loss = criterion(outputs, labels_batch)
+                        else:
+                            outputs = model.forward_batch_mixto(keypoints, tipos_batch)
+                            loss = criterion(outputs, labels_batch)
 
-                            val_loss += loss.item()
-                            _, predicted = torch.max(outputs, 1)
-                            val_total += labels_batch.size(0)
-                            val_correct += (predicted == labels_batch).sum().item()
+                        val_loss += loss.item()
+                        _, predicted = torch.max(outputs, 1)
+                        val_total += labels_batch.size(0)
+                        val_correct += (predicted == labels_batch).sum().item()
 
-                            for real, pred in zip(labels_batch.tolist(), predicted.tolist()):
-                                matriz_confusion_epoch[real][pred] += 1
-
-                            del keypoints, labels_batch, outputs, loss, predicted
-                        except RuntimeError as e:
-                            if "out of memory" not in str(e):
-                                raise
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                            gc.collect()
+                        for real, pred in zip(labels_batch.tolist(), predicted.tolist()):
+                            matriz_confusion_epoch[real][pred] += 1
 
                 train_acc = train_correct / train_total if train_total > 0 else 0
                 val_acc = val_correct / val_total if val_total > 0 else 0
                 avg_train_loss = train_loss / len(train_loader) if len(train_loader) > 0 else 0
                 avg_val_loss = val_loss / len(val_loader) if len(val_loader) > 0 else 0
 
+                # Accuracy por clase de esta época, para no perder de vista clases
+                # débiles (como B) aunque el accuracy global se vea bien.
+                accuracy_por_clase_epoch = {}
+                for i, clase in enumerate(clases):
+                    total_clase_epoch = matriz_confusion_epoch[i].sum()
+                    accuracy_por_clase_epoch[clase] = (
+                        float(matriz_confusion_epoch[i][i] / total_clase_epoch) if total_clase_epoch > 0 else 0.0
+                    )
+                min_class_acc = min(accuracy_por_clase_epoch.values()) if accuracy_por_clase_epoch else 0.0
+
+                # Puntaje compuesto usado para elegir el mejor checkpoint: no solo el
+                # accuracy global, también qué tan mal le va a la clase más débil.
+                # Esto evita quedarnos con una época donde el accuracy total es alto
+                # pero una letra (ej. B) sigue mal reconocida.
+                score_compuesto = 0.6 * val_acc + 0.4 * min_class_acc
+
                 self._actualizar_progreso(
                     nombre_modelo, epoch_actual=epoch + 1, accuracy=float(val_acc),
                     loss=float(avg_val_loss), train_accuracy=float(train_acc),
                     train_loss=float(avg_train_loss), progreso=((epoch + 1) / epochs) * 100.0,
-                    mensaje=f"Época {epoch + 1}/{epochs} | Train: {train_acc:.4f} | Val: {val_acc:.4f}"
+                    accuracy_por_clase=accuracy_por_clase_epoch,
+                    mensaje=f"Época {epoch + 1}/{epochs} | Train: {train_acc:.4f} | Val: {val_acc:.4f} | "
+                            f"Peor clase: {min_class_acc:.4f}"
                 )
 
-                if val_acc > best_accuracy:
+                if score_compuesto > mejor_score:
+                    mejor_score = score_compuesto
                     best_accuracy = val_acc
-                    best_model_state = model.state_dict().copy()
+                    best_model_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
                     matriz_confusion_val = matriz_confusion_epoch.copy()
                     patience_counter = 0
                 else:
                     patience_counter += 1
 
-                if (epoch + 1) % 5 == 0 or epoch == 0 or epoch == epochs - 1:
-                    logger.info(
-                        f"Época {epoch + 1:3d}/{epochs} | Train: {train_acc:.4f} | "
-                        f"Val: {val_acc:.4f} | Best: {best_accuracy:.4f}"
-                    )
+                if (epoch + 1) % 10 == 0 or epoch == 0 or epoch == epochs - 1:
+                    logger.info(f"Época {epoch + 1:3d}/{epochs} | Train: {train_acc:.4f} | "
+                                f"Val: {val_acc:.4f} | Best: {best_accuracy:.4f} | "
+                                f"Peor clase: {min_class_acc:.4f}")
 
                 if patience_counter >= patience:
                     logger.info(f"Early stopping en época {epoch + 1}")
@@ -728,13 +859,31 @@ class ServicioEntrenamientoUnificado:
                 aciertos_clase = matriz_confusion_val[i][i]
                 accuracy_por_clase[clase] = float(aciertos_clase / total_clase) if total_clase > 0 else 0.0
 
-            logger.info(f"Accuracy por clase (mejor época): {accuracy_por_clase}")
+            logger.info(f"Accuracy por clase: {accuracy_por_clase}")
 
-            ruta_modelo = self._guardar_modelo(
-                model, nombre_modelo, clases, best_accuracy, tipos_senas,
-                accuracy_por_clase, matriz_confusion_val.tolist()
-            )
-            self._actualizar_bd(db, nombre_modelo, str(ruta_modelo), clases, best_accuracy, epochs, total_videos)
+            clases_debiles = {c: a for c, a in accuracy_por_clase.items() if a < self.min_accuracy_por_clase}
+            if clases_debiles:
+                logger.warning(
+                    f"Estas clases quedaron por debajo de {self.min_accuracy_por_clase * 100:.0f}% de accuracy: "
+                    f"{clases_debiles}. Si alguna es una letra que ya regrabaste (ej. B), revisa la calidad e "
+                    f"iluminación de esos videos, o agrega más ejemplos de esa seña."
+                )
+
+            ruta_modelo = self._guardar_modelo(model, nombre_modelo, clases, best_accuracy, tipos_senas,
+                                                accuracy_por_clase, matriz_confusion_val.tolist())
+
+            db_final = SessionLocal()
+            try:
+                self._actualizar_bd(db_final, nombre_modelo, str(ruta_modelo), clases,
+                                     best_accuracy, epochs, total_videos)
+            finally:
+                db_final.close()
+
+            try:
+                from app.servicios.gestor_reconocimiento import limpiar_cache
+                limpiar_cache()
+            except Exception as e:
+                logger.warning(f"No se pudo limpiar cache: {e}")
 
             self._actualizar_progreso(
                 nombre_modelo, estado="completado", entrenando=False,
@@ -748,23 +897,17 @@ class ServicioEntrenamientoUnificado:
             raise
         finally:
             del train_loader, val_loader, model
-            if db is not None:
-                try:
-                    db.close()
-                except Exception:
-                    pass
             try:
                 limpiar_carpeta_temporal(f"temp_entrenamiento_{nombre_modelo}")
             except Exception as e:
-                logger.warning(f"No se pudo limpiar carpeta temporal: {e}")
-
+                logger.warning(f"No se pudo limpiar temp: {e}")
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    def _guardar_modelo(self, model, nombre_modelo: str, clases: List[str],
-                         accuracy: float, tipos_senas: dict,
-                         accuracy_por_clase: Dict[str, float], matriz_confusion: list) -> Path:
+    def _guardar_modelo(self, model, nombre_modelo: str, clases: List[str], accuracy: float,
+                        tipos_senas: dict, accuracy_por_clase: Dict[str, float],
+                        matriz_confusion: list) -> Path:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
@@ -781,48 +924,85 @@ class ServicioEntrenamientoUnificado:
             'frames_estaticos': self.frames_estaticos_modelo,
             'arquitectura': 'ModeloAdaptativoSenas_LSTM',
             'framework': 'pytorch_lstm_keypoints',
+            'extractor_version': 'secuencias_v3',
             'tipos_senas': tipos_senas,
             'fecha_entrenamiento': datetime.now().isoformat(),
-            'version': '6.0_unificado'
+            'version': '11.0'
         }, str(ruta_modelo))
 
         try:
             respaldar_modelo_en_drive(ruta_modelo)
         except Exception as e:
-            logger.warning(f"No se pudo respaldar en Drive (modelo local OK): {e}")
+            logger.warning(f"No se pudo respaldar en Drive: {e}")
 
         return ruta_modelo
 
     def _actualizar_bd(self, db: Session, nombre_modelo: str, ruta_modelo: str,
                         clases: List[str], accuracy: float, epochs: int, total_videos: int):
-        try:
-            modelo_db = db.query(ModeloIA).filter(ModeloIA.nombre == nombre_modelo).first()
-            if not modelo_db:
-                modelo_db = ModeloIA(nombre=nombre_modelo)
-                db.add(modelo_db)
+        ultimo_error = None
 
-            modelo_db.ruta_archivo = ruta_modelo
-            modelo_db.accuracy = round(float(accuracy), 6)
-            modelo_db.num_clases = len(clases)
-            modelo_db.clases_json = json.dumps(clases, ensure_ascii=False)
-            modelo_db.total_imagenes = total_videos
-            modelo_db.epocas_entrenamiento = epochs
-            modelo_db.arquitectura = "LSTM_Keypoints_Unificado"
-            modelo_db.entrenando = False
-            modelo_db.activo = True
-            modelo_db.fecha_entrenamiento = datetime.now()
-            modelo_db.version = "6.0"
-            modelo_db.descripcion = (
-                f"Modelo LSTM sobre keypoints, {len(clases)} señas, "
-                f"{total_videos} videos, accuracy: {accuracy * 100:.2f}%"
-            )
+        for intento in range(3):
+            try:
+                modelo_db = db.query(ModeloIA).filter(ModeloIA.nombre == nombre_modelo).first()
 
-            db.commit()
-            db.refresh(modelo_db)
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Error actualizando BD: {e}")
-            raise
+                if not modelo_db:
+                    modelo_db = ModeloIA(
+                        nombre=nombre_modelo,
+                        version="11.0",
+                        descripcion=f"Modelo LSTM keypoints 256x2, {len(clases)} señas, {total_videos} videos, "
+                                    f"accuracy: {accuracy * 100:.2f}%",
+                        ruta_archivo=ruta_modelo,
+                        accuracy=round(float(accuracy), 6),
+                        num_clases=len(clases),
+                        clases_json=json.dumps(clases, ensure_ascii=False),
+                        total_imagenes=total_videos,
+                        epocas_entrenamiento=epochs,
+                        arquitectura="LSTM_Keypoints_Unificado",
+                        entrenando=False,
+                        activo=True,
+                        fecha_entrenamiento=datetime.now(),
+                        num_frames=self.num_frames,
+                        origen="entrenado_local",
+                    )
+                    db.add(modelo_db)
+                    db.flush()
+                else:
+                    modelo_db.ruta_archivo = ruta_modelo
+                    modelo_db.accuracy = round(float(accuracy), 6)
+                    modelo_db.num_clases = len(clases)
+                    modelo_db.clases_json = json.dumps(clases, ensure_ascii=False)
+                    modelo_db.total_imagenes = total_videos
+                    modelo_db.epocas_entrenamiento = epochs
+                    modelo_db.arquitectura = "LSTM_Keypoints_Unificado"
+                    modelo_db.entrenando = False
+                    modelo_db.activo = True
+                    modelo_db.fecha_entrenamiento = datetime.now()
+                    modelo_db.version = "11.0"
+                    modelo_db.num_frames = self.num_frames
+
+                db.query(ModeloIA).filter(
+                    ModeloIA.activo == True,
+                    ModeloIA.id != modelo_db.id
+                ).update({"activo": False}, synchronize_session=False)
+
+                db.commit()
+                db.refresh(modelo_db)
+                logger.info(f"Modelo {nombre_modelo} activado (id={modelo_db.id})")
+                return
+
+            except Exception as e:
+                ultimo_error = e
+                db.rollback()
+                logger.warning(f"Intento {intento + 1}/3 falló: {e}")
+                try:
+                    db.close()
+                except Exception:
+                    pass
+                from app.utilidades.base_datos import SessionLocal as _SL
+                db = _SL()
+
+        logger.error(f"No se pudo actualizar BD tras 3 intentos: {ultimo_error}")
+        raise ultimo_error
 
 
 servicio_entrenamiento = ServicioEntrenamientoUnificado()
