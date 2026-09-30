@@ -1,5 +1,6 @@
 from typing import List, Optional
-from pydantic import BaseModel
+
+from pydantic import BaseModel, Field
 
 
 class PermisoRespuesta(BaseModel):
@@ -10,6 +11,17 @@ class PermisoRespuesta(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class PermisoCrear(BaseModel):
+    codigo: str = Field(..., min_length=3, max_length=80, pattern=r"^[a-z0-9_.]+$")
+    modulo: str = Field(..., min_length=2, max_length=50, pattern=r"^[a-z0-9_]+$")
+    descripcion: str = Field(..., min_length=3, max_length=255)
+
+
+class PermisoActualizar(BaseModel):
+    modulo: Optional[str] = Field(None, min_length=2, max_length=50, pattern=r"^[a-z0-9_]+$")
+    descripcion: Optional[str] = Field(None, min_length=3, max_length=255)
 
 
 class RolRespuesta(BaseModel):
@@ -26,15 +38,15 @@ class RolRespuesta(BaseModel):
 
 
 class RolCrear(BaseModel):
-    codigo: str
-    nombre: str
-    descripcion: Optional[str] = None
+    codigo: str = Field(..., min_length=3, max_length=50, pattern=r"^[a-z0-9_]+$")
+    nombre: str = Field(..., min_length=2, max_length=100)
+    descripcion: Optional[str] = Field(None, max_length=500)
     permisos_ids: List[int] = []
 
 
 class RolActualizar(BaseModel):
-    nombre: Optional[str] = None
-    descripcion: Optional[str] = None
+    nombre: Optional[str] = Field(None, min_length=2, max_length=100)
+    descripcion: Optional[str] = Field(None, max_length=500)
     activo: Optional[bool] = None
 
 

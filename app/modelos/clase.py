@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, Text, ForeignKey, Enum, Float
+from sqlalchemy import Column, Integer, String, Boolean, Text, ForeignKey, Enum, Float, Index
 from sqlalchemy.orm import relationship
 import enum
 from ..utilidades.base_datos import Base
@@ -13,10 +13,13 @@ class TipoVideo(str, enum.Enum):
 
 class Clase(AuditoriaMixin, Base):
     __tablename__ = "clases"
+    __table_args__ = (
+        Index("ix_clases_leccion_orden", "leccion_id", "orden"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
 
-    leccion_id = Column(Integer, ForeignKey("lecciones.id"), nullable=False)
+    leccion_id = Column(Integer, ForeignKey("lecciones.id"), nullable=False, index=True)
 
     titulo = Column(String(255), nullable=False)
     descripcion = Column(Text, nullable=True)
@@ -27,6 +30,7 @@ class Clase(AuditoriaMixin, Base):
     tipo_video = Column(Enum(TipoVideo), default=TipoVideo.YOUTUBE)
     video_url = Column(String(500), nullable=True)
     video_id = Column(String(255), nullable=True)
+    video_archivo = Column(String(255), nullable=True)
 
     imagen_referencia = Column(String(500), nullable=True)
     gif_demostracion = Column(String(500), nullable=True)
@@ -51,11 +55,19 @@ class Clase(AuditoriaMixin, Base):
         return f"<Clase(id={self.id}, titulo='{self.titulo}', leccion_id={self.leccion_id})>"
 
     @property
+    def tiene_video_local(self):
+        return bool(self.video_archivo)
+
+    @property
     def url_video_embebida(self):
-        if self.tipo_video == TipoVideo.YOUTUBE and self.video_id:
+        if not self.video_id:
+            return None
+        if self.tipo_video == TipoVideo.YOUTUBE:
             return f"https://www.youtube.com/embed/{self.video_id}"
-        elif self.tipo_video == TipoVideo.GOOGLE_DRIVE and self.video_id:
+        if self.tipo_video == TipoVideo.GOOGLE_DRIVE:
             return f"https://drive.google.com/file/d/{self.video_id}/preview"
+        if self.tipo_video == TipoVideo.VIMEO:
+            return f"https://player.vimeo.com/video/{self.video_id}"
         return None
 
     def calcular_puntos_obtenidos(self, precision: float, completada: bool = False):

@@ -1,16 +1,24 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Float
+from datetime import datetime, timezone
+from typing import Optional
+
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import relationship
-from datetime import datetime
+
 from ..utilidades.base_datos import Base
 from .mixins import AuditoriaMixin
 
 
+def _ahora() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 class ProgresoClase(AuditoriaMixin, Base):
     __tablename__ = "progreso_clases"
+    __table_args__ = (UniqueConstraint("usuario_id", "clase_id", name="uq_progreso_clase_usuario_clase"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
-    clase_id = Column(Integer, ForeignKey("clases.id"), nullable=False)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False, index=True)
+    clase_id = Column(Integer, ForeignKey("clases.id"), nullable=False, index=True)
 
     vista = Column(Boolean, default=False)
     completada = Column(Boolean, default=False)
@@ -36,13 +44,13 @@ class ProgresoClase(AuditoriaMixin, Base):
 
     @property
     def porcentaje_precision(self):
-        return f"{int(self.mejor_precision * 100)}%"
+        return f"{int((self.mejor_precision or 0) * 100)}%"
 
     @property
     def tasa_exito(self):
-        if self.intentos_realizados == 0:
+        if not self.intentos_realizados:
             return 0.0
-        return self.intentos_exitosos / self.intentos_realizados
+        return (self.intentos_exitosos or 0) / self.intentos_realizados
 
     @property
     def porcentaje_tasa_exito(self):
@@ -50,29 +58,31 @@ class ProgresoClase(AuditoriaMixin, Base):
 
     @property
     def eficiencia_puntos(self):
-        if self.tiempo_total_practica == 0:
+        if not self.tiempo_total_practica:
             return 0.0
-        return self.puntos_ganados / max(self.tiempo_total_practica / 60, 1)
+        return (self.puntos_ganados or 0) / max(self.tiempo_total_practica / 60, 1)
 
     @property
     def nivel_dominio(self):
-        if self.mejor_precision >= 0.9:
+        precision = self.mejor_precision or 0
+        if precision >= 0.9:
             return "Perfecto"
-        elif self.mejor_precision >= 0.8:
+        if precision >= 0.8:
             return "Excelente"
-        elif self.mejor_precision >= 0.7:
+        if precision >= 0.7:
             return "Bueno"
-        elif self.mejor_precision >= 0.6:
+        if precision >= 0.6:
             return "Aceptable"
-        else:
-            return "Necesita Mejorar"
+        return "Necesita Mejorar"
 
     @property
     def dias_desde_ultima_practica(self):
-        if not self.ultima_practica:
+        ultima = self.ultima_practica
+        if not ultima:
             return 999
-        delta = datetime.now().replace(tzinfo=None) - self.ultima_practica.replace(tzinfo=None)
-        return delta.days
+        if ultima.tzinfo is None:
+            ultima = ultima.replace(tzinfo=timezone.utc)
+        return (_ahora() - ultima).days
 
     @property
     def esta_en_racha(self):
@@ -80,95 +90,100 @@ class ProgresoClase(AuditoriaMixin, Base):
 
     @property
     def tiempo_promedio_intento(self):
-        if self.intentos_realizados == 0:
+        if not self.intentos_realizados:
             return 0
-        return self.tiempo_total_practica // self.intentos_realizados
+        return (self.tiempo_total_practica or 0) // self.intentos_realizados
 
     @property
     def racha_dias_consecutivos(self):
         if self.dias_desde_ultima_practica <= 1:
-            return min(getattr(self, '_racha_calculada', 1), 30)
+            return min(getattr(self, "_racha_calculada", 1), 30)
         return 0
 
     @property
     def mejor_racha(self):
-        return max(getattr(self, '_mejor_racha_calculada', 0), self.racha_dias_consecutivos)
+        return max(getattr(self, "_mejor_racha_calculada", 0), self.racha_dias_consecutivos)
 
-    def registrar_intento(self, precision: float, duracion_segundos: int, clase_obj=None, es_exitoso: bool = None):
-        self.intentos_realizados += 1
+    def registrar_intento(
+        self,
+        precision: float,
+        duracion_segundos: int,
+        clase_obj=None,
+        es_exitoso: Optional[bool] = None,
+    ):
+        ahora = _ahora()
+
+        self.intentos_realizados = (self.intentos_realizados or 0) + 1
         self.ultima_precision = precision
-        self.tiempo_total_practica += duracion_segundos
+        self.tiempo_total_practica = (self.tiempo_total_practica or 0) + duracion_segundos
 
-        if precision > self.mejor_precision:
+        if precision > (self.mejor_precision or 0):
             self.mejor_precision = precision
-            self.fecha_mejor_precision = datetime.now()
+            self.fecha_mejor_precision = ahora
 
-        if self.precision_promedio == 0:
-            self.precision_promedio = precision
-        else:
-            self.precision_promedio = (self.precision_promedio + precision) / 2
+        n = self.intentos_realizados
+        self.precision_promedio = ((self.precision_promedio or 0) * (n - 1) + precision) / n
 
         if es_exitoso is None:
-            precision_minima = 0.7
-            if clase_obj:
-                precision_minima = getattr(clase_obj, 'precision_minima', 0.7)
-            es_exitoso = precision >= precision_minima
+            precision_minima = getattr(clase_obj, "precision_minima", None) if clase_obj else None
+            es_exitoso = precision >= (0.7 if precision_minima is None else precision_minima)
 
         puntos_base = 10
         xp_base = 5
 
         if es_exitoso:
-            self.intentos_exitosos += 1
+            self.intentos_exitosos = (self.intentos_exitosos or 0) + 1
             puntos_ganados = int(puntos_base * precision)
             xp_ganado = int(xp_base * precision)
         else:
             puntos_ganados = int(puntos_base * precision * 0.5)
             xp_ganado = int(xp_base * precision * 0.3)
 
-        self.puntos_ganados += puntos_ganados
-        self.xp_ganado += xp_ganado
-        self.ultima_practica = datetime.now()
+        self.puntos_ganados = (self.puntos_ganados or 0) + puntos_ganados
+        self.xp_ganado = (self.xp_ganado or 0) + xp_ganado
+        self.ultima_practica = ahora
 
         self.verificar_completada(clase_obj)
 
         return {
-            'puntos_ganados': puntos_ganados,
-            'xp_ganado': xp_ganado,
-            'precision': precision,
-            'es_exitoso': es_exitoso,
-            'nivel_dominio': self.obtener_nivel_dominio()
+            "puntos_ganados": puntos_ganados,
+            "xp_ganado": xp_ganado,
+            "precision": precision,
+            "es_exitoso": es_exitoso,
+            "nivel_dominio": self.obtener_nivel_dominio(),
         }
 
     def verificar_completada(self, clase_obj=None):
-        intentos_minimos = 3
-        precision_minima = 0.7
+        intentos_minimos = getattr(clase_obj, "intentos_minimos", None) if clase_obj else None
+        precision_minima = getattr(clase_obj, "precision_minima", None) if clase_obj else None
 
-        if clase_obj:
-            intentos_minimos = getattr(clase_obj, 'intentos_minimos', 3)
-            precision_minima = getattr(clase_obj, 'precision_minima', 0.7)
+        intentos_minimos = 3 if intentos_minimos is None else intentos_minimos
+        precision_minima = 0.7 if precision_minima is None else precision_minima
 
-        if (self.intentos_realizados >= intentos_minimos and
-            self.mejor_precision >= precision_minima):
-            self.completada = True
-            self.fecha_completada = datetime.now()
+        if (self.intentos_realizados or 0) >= intentos_minimos and (self.mejor_precision or 0) >= precision_minima:
+            if not self.completada:
+                self.completada = True
+                self.fecha_completada = _ahora()
+            self.aprobada = True
             return True
         return False
 
     def obtener_nivel_dominio(self):
-        if self.mejor_precision >= 0.9:
+        precision = self.mejor_precision or 0
+        if precision >= 0.9:
             return "Avanzado"
-        elif self.mejor_precision >= 0.7:
+        if precision >= 0.7:
             return "Intermedio"
-        else:
-            return "Principiante"
+        return "Principiante"
 
 
 class ProgresoLeccion(AuditoriaMixin, Base):
     __tablename__ = "progreso_lecciones"
+    __table_args__ = (UniqueConstraint("usuario_id", "leccion_id", name="uq_progreso_leccion_usuario_leccion"),)
 
     id = Column(Integer, primary_key=True, index=True)
-    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False)
-    leccion_id = Column(Integer, ForeignKey("lecciones.id"), nullable=False)
+    usuario_id = Column(Integer, ForeignKey("usuarios.id"), nullable=False, index=True)
+    leccion_id = Column(Integer, ForeignKey("lecciones.id"), nullable=False, index=True)
 
     desbloqueada = Column(Boolean, default=False)
     bloqueada = Column(Boolean, default=True)

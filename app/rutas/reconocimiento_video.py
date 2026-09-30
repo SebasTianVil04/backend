@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 from datetime import datetime
@@ -15,6 +16,7 @@ from ..modelos.usuario import Usuario
 from ..modelos.entrenamiento import ModeloIA
 from ..servicios.gestor_reconocimiento import (
     obtener_reconocedor,
+    obtener_reconocedor_por_modelo,
     obtener_reconocedor_cacheado,
     determinar_tipo_sena,
     procesar_frame_base64,
@@ -42,6 +44,7 @@ class SolicitudVideoSecuencia(BaseModel):
     configuracion: Dict[str, Any] = {}
     sena_esperada: Optional[str] = None
     categoria_id: Optional[int] = None
+    modelo_id: Optional[int] = None  # Si viene, se usa solo ese modelo (debe estar activo)
 
 
 CATEGORIAS_CALIDAD = (
@@ -114,6 +117,56 @@ def _respuesta_fallida(mensaje, categoria_id, frames_procesados=0, errores=None)
     return r
 
 
+def _iso(valor) -> Optional[str]:
+    return valor.isoformat() if valor else None
+
+
+@router.get("/modelos-activos")
+def listar_modelos_activos(
+    db: Session = Depends(obtener_bd),
+    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+):
+    """Modelos activos (con archivo presente en disco) que el usuario puede elegir para traducir."""
+    try:
+        activos = db.query(ModeloIA).filter(ModeloIA.activo == True).all()
+
+        disponibles = [
+            m for m in activos
+            if m.ruta_archivo and os.path.exists(m.ruta_archivo)
+        ]
+        disponibles.sort(key=lambda m: m.fecha_entrenamiento or datetime.min, reverse=True)
+
+        modelos = [
+            {
+                "id": m.id,
+                "nombre": m.nombre,
+                "accuracy": m.accuracy or 0.0,
+                "num_clases": m.num_clases or 0,
+                "arquitectura": getattr(m, "arquitectura", None),
+                "tipo": getattr(m, "tipo_modelo", None),
+                "fecha_activacion": _iso(getattr(m, "fecha_activacion", None)),
+            }
+            for m in disponibles
+        ]
+
+        return {
+            "exito": True,
+            "mensaje": f"{len(modelos)} modelos activos",
+            "datos": {
+                "total": len(modelos),
+                "modelos": modelos,
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"Error listando modelos activos: {e}", exc_info=True)
+        return {
+            "exito": False,
+            "mensaje": f"Error: {e}",
+            "datos": {"total": 0, "es_ensemble": False, "modelos": []}
+        }
+
+
 @router.post("/secuencia", response_model=Dict[str, Any])
 def reconocer_secuencia_video(
     solicitud: SolicitudVideoSecuencia,
@@ -134,7 +187,13 @@ def reconocer_secuencia_video(
                 solicitud.categoria_id
             )
 
-        reconocedor, modelo_id = obtener_reconocedor(db, solicitud.categoria_id)
+        try:
+            if solicitud.modelo_id:
+                reconocedor, modelo_id = obtener_reconocedor_por_modelo(db, solicitud.modelo_id)
+            else:
+                reconocedor, modelo_id = obtener_reconocedor(db, solicitud.categoria_id)
+        except ValueError as e:
+            return _respuesta_fallida(str(e), solicitud.categoria_id)
 
         keypoints_cliente: List[np.ndarray] = []
         for frame_data in solicitud.frames:
@@ -201,6 +260,8 @@ def reconocer_secuencia_video(
             reverse=True
         )[:3]
 
+        es_ensemble = bool(getattr(reconocedor, "es_ensemble", False))
+
         resultado = {
             "sena_detectada": sena_detectada,
             "texto_traducido": sena_detectada,
@@ -222,14 +283,18 @@ def reconocer_secuencia_video(
                 "modelo_id": modelo_id,
                 "categoria_id": solicitud.categoria_id,
                 "modelo_nombre": reconocedor.arquitectura,
-                "modo_usado": tipo_sena
+                "modo_usado": tipo_sena,
+                "es_ensemble": es_ensemble,
+                "ensemble": detalles.get("modelos_ensemble"),  # None si es un solo modelo
+                "seleccion_manual": bool(solicitud.modelo_id),
             },
             "timestamp": datetime.now().isoformat()
         }
 
         logger.info(
-            f"Reconocimiento [Cat:{solicitud.categoria_id}] "
-            f"[keypoints={resultado['fuente_keypoints']}]: {sena_detectada} "
+            f"Reconocimiento [Cat:{solicitud.categoria_id}] [Modelo:{modelo_id}"
+            f"{' (manual)' if solicitud.modelo_id else ''}] "
+            f"[keypoints={resultado['fuente_keypoints']}] [ensemble={es_ensemble}]: {sena_detectada} "
             f"({confianza_validada * 100:.1f}%) - Modo: {tipo_sena}"
         )
 
@@ -250,6 +315,15 @@ def obtener_info_modelo(
     try:
         reconocedor, modelo_id = obtener_reconocedor(db)
         modelo_db = db.query(ModeloIA).filter(ModeloIA.id == modelo_id).first()
+        es_ensemble = bool(getattr(reconocedor, "es_ensemble", False))
+
+        miembros = None
+        if es_ensemble:
+            miembros = [
+                {"modelo_id": m.modelo_id, "nombre": m.nombre, "peso": m.peso,
+                 "accuracy": round((m.reconocedor.accuracy or 0.0) * 100, 2)}
+                for m in reconocedor.miembros
+            ]
 
         return {
             "exito": True,
@@ -263,13 +337,15 @@ def obtener_info_modelo(
                 "accuracy_entrenamiento": round(reconocedor.accuracy * 100, 2),
                 "fecha_entrenamiento": modelo_db.fecha_entrenamiento.isoformat() if modelo_db and modelo_db.fecha_entrenamiento else None,
                 "tipos_senas": reconocedor.tipos_senas,
-                "extractor_version": getattr(reconocedor, "extractor_version", None)
+                "extractor_version": getattr(reconocedor, "extractor_version", None),
+                "es_ensemble": es_ensemble,
+                "miembros_ensemble": miembros,
             },
             "sistema": {
                 "device": str(reconocedor.device),
                 "cuda_disponible": str(reconocedor.device).startswith('cuda'),
                 "amp_enabled": reconocedor.enable_amp,
-                "modo": "keypoints_lstm"
+                "modo": "ensemble_keypoints_lstm" if es_ensemble else "keypoints_lstm"
             }
         }
 
@@ -279,7 +355,10 @@ def obtener_info_modelo(
 
 
 @router.get("/estado")
-def obtener_estado_reconocimiento(db: Session = Depends(obtener_bd)):
+def obtener_estado_reconocimiento(
+    db: Session = Depends(obtener_bd),
+    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+):
     try:
         cache_info = info_cache()
         reconocedor = None
@@ -304,6 +383,9 @@ def obtener_estado_reconocimiento(db: Session = Depends(obtener_bd)):
             "device": str(reconocedor.device) if reconocedor else "ninguno",
             "ultimo_uso": cache_info['ultimo_acceso'].get(modelo_id) if modelo_id else None,
             "modo": "keypoints_lstm",
+            "modelos_en_cache": cache_info['modelos_cargados'],
+            "ensemble_activo": cache_info.get('ensemble_activo', False),
+            "ensemble_modelos": cache_info.get('ensemble_modelos', []),
             "timestamp": datetime.now().isoformat()
         }
 

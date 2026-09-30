@@ -1,4 +1,5 @@
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -38,6 +39,28 @@ def crear_detector_manos(
         min_detection_confidence=confianza_deteccion,
         min_tracking_confidence=confianza_seguimiento,
     )
+
+
+@contextmanager
+def detector_para_lote(
+    confianza_deteccion: float = 0.5,
+    confianza_seguimiento: float = 0.5,
+):
+    hands = crear_detector_manos(False, confianza_deteccion, confianza_seguimiento)
+    try:
+        yield hands
+    finally:
+        hands.close()
+
+
+def _limpiar_seguimiento(hands) -> None:
+    negro = np.zeros((64, 64, 3), dtype=np.uint8)
+    for _ in range(2):
+        try:
+            hands.process(negro)
+        except Exception as e:
+            logger.warning(f"No se pudo limpiar el seguimiento del detector: {e}")
+            break
 
 
 def landmarks_de_frame(frame: np.ndarray, hands) -> Tuple[np.ndarray, np.ndarray]:
@@ -223,9 +246,14 @@ def extraer_secuencia_landmarks(
     max_hueco: int = 8,
     confianza_deteccion: float = 0.5,
     confianza_seguimiento: float = 0.5,
+    hands=None,
 ) -> Optional[ResultadoSecuencia]:
-    with crear_detector_manos(False, confianza_deteccion, confianza_seguimiento) as hands:
+    if hands is not None:
+        _limpiar_seguimiento(hands)
         lectura = _leer_video(ruta_video, hands, max(1, paso))
+    else:
+        with crear_detector_manos(False, confianza_deteccion, confianza_seguimiento) as detector:
+            lectura = _leer_video(ruta_video, detector, max(1, paso))
 
     if lectura is None:
         return None

@@ -1,7 +1,9 @@
 from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, ForeignKey, Table
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
+
 from ..utilidades.base_datos import Base
+
 
 rol_permisos = Table(
     "rol_permisos",
@@ -23,10 +25,12 @@ class Rol(Base):
     creado_en = Column(DateTime(timezone=True), server_default=func.now())
     actualizado_en = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    permisos = relationship("Permiso", secondary=rol_permisos, back_populates="roles")
+    permisos = relationship("Permiso", secondary=rol_permisos, back_populates="roles", lazy="selectin")
     usuarios = relationship("Usuario", back_populates="rol")
 
     def tiene_permiso(self, codigo: str) -> bool:
+        if self.codigo == "admin":
+            return True
         return any(p.codigo == codigo for p in self.permisos)
 
     def __repr__(self):

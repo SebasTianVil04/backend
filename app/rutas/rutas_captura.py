@@ -1,22 +1,32 @@
+import os
 import logging
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
+from ..dependencias.permisos import requiere_permiso
 from ..esquemas.respuestas import RespuestaAPI
 from ..modelos.dataset import CategoriaDataset, VideoDataset
 from ..modelos.usuario import Usuario
 from ..servicios.dataset_service import dataset_service
 from ..utilidades.base_datos import obtener_bd
-from ..utilidades.seguridad import obtener_usuario_actual
 
 
 router = APIRouter(prefix="/captura-entrenamiento", tags=["Captura en Tiempo Real"])
 logger = logging.getLogger(__name__)
 
 EXTENSIONES_PERMITIDAS = {"webm", "mp4"}
+TAMANO_MINIMO_BYTES = 1024
 TAMANO_MAXIMO_BYTES = 50 * 1024 * 1024
+LONGITUD_MAXIMA_SENA = 100
+
+
+def _tamano_archivo(archivo: UploadFile) -> int:
+    archivo.file.seek(0, os.SEEK_END)
+    tamano = archivo.file.tell()
+    archivo.file.seek(0)
+    return tamano
 
 
 @router.post("/capturar-video-archivo", response_model=RespuestaAPI)
@@ -25,24 +35,42 @@ async def capturar_video_archivo(
     categoria_id: int = Form(...),
     sena: str = Form(...),
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario_actual: Usuario = Depends(requiere_permiso("captura.gestionar")),
 ):
     try:
-        if not sena or not sena.strip():
+        nombre_sena = (sena or "").strip()
+        if not nombre_sena:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="El nombre de la seña es requerido",
+            )
+        if len(nombre_sena) > LONGITUD_MAXIMA_SENA:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El nombre de la seña es demasiado largo",
             )
 
         extension = (archivo.filename or "").rsplit(".", 1)[-1].lower()
         if extension not in EXTENSIONES_PERMITIDAS:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Formato de video no permitido: .{extension}",
+                detail="Formato de video no permitido",
+            )
+
+        tamano = _tamano_archivo(archivo)
+        if tamano < TAMANO_MINIMO_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El archivo de video está vacío o es demasiado pequeño",
+            )
+        if tamano > TAMANO_MAXIMO_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="El video supera el tamaño máximo permitido",
             )
 
         categoria = (
-            db.query(CategoriaDataset)
+            db.query(CategoriaDataset.id)
             .filter(
                 CategoriaDataset.id == categoria_id,
                 CategoriaDataset.activa.is_(True),
@@ -55,11 +83,12 @@ async def capturar_video_archivo(
                 detail="Categoría no encontrada o inactiva",
             )
 
+
         video = await dataset_service.subir_video_dataset(
             db=db,
             archivo=archivo,
             categoria_id=categoria_id,
-            sena=sena.strip().upper(),
+            sena=nombre_sena.upper(),
             usuario_id=usuario_actual.id,
         )
 
@@ -101,14 +130,46 @@ async def capturar_video_archivo(
         logger.error("Error capturando video: %s", e, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error procesando video: {str(e)}",
+            detail="Error procesando video",
         )
 
 
-@router.get("/estadisticas-captura", response_model=RespuestaAPI)
-async def obtener_estadisticas_captura(
+@router.get("/conteo-sena", response_model=RespuestaAPI)
+def contar_videos_sena(
+    categoria_id: int,
+    sena: str = Query(..., min_length=1, max_length=LONGITUD_MAXIMA_SENA),
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario_actual: Usuario = Depends(requiere_permiso("captura.gestionar")),
+):
+    fila = (
+        db.query(
+            func.count(VideoDataset.id).label("total"),
+            func.sum(case((VideoDataset.aprobado.is_(True), 1), else_=0)).label("aprobados"),
+        )
+        .filter(
+            VideoDataset.usuario_id == usuario_actual.id,
+            VideoDataset.categoria_id == categoria_id,
+            VideoDataset.sena == sena.strip().upper(),
+            VideoDataset.rechazado.is_(False),
+        )
+        .first()
+    )
+
+    total = int(fila.total or 0)
+    aprobados = int(fila.aprobados or 0)
+
+    return RespuestaAPI(
+        exito=True,
+        mensaje="Conteo obtenido",
+        datos={"total": total, "aprobados": aprobados, "pendientes": total - aprobados},
+    )
+
+
+
+@router.get("/estadisticas-captura", response_model=RespuestaAPI)
+def obtener_estadisticas_captura(
+    db: Session = Depends(obtener_bd),
+    usuario_actual: Usuario = Depends(requiere_permiso("captura.gestionar")),
 ):
     try:
         stats = (

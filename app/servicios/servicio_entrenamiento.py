@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 from threading import Lock
 from datetime import datetime
+from contextlib import ExitStack
 from typing import Dict, Any, List, Optional, Tuple
 
 import torch
@@ -28,6 +29,7 @@ from app.servicios.drive_service import (
 from app.servicios.extractor_secuencias import (
     extraer_secuencia_landmarks,
     secuencia_desde_keypoints,
+    detector_para_lote,
     ResultadoSecuencia,
     VERSION_SECUENCIAS,
 )
@@ -103,11 +105,6 @@ class AumentadorKeypoints:
 
     @staticmethod
     def aplicar_escala_z(secuencia: np.ndarray, factor_z: float) -> np.ndarray:
-        """
-        La normalización (_normalizar_mano) escala x,y por la distancia
-        muñeca->nudillo, pero deja z sin tocar. Esto simula que la mano esté
-        más cerca o más lejos de la cámara sin que cambie la seña en sí.
-        """
         resultado = secuencia.copy()
         for i in range(len(resultado)):
             frame = resultado[i]
@@ -121,12 +118,6 @@ class AumentadorKeypoints:
 
     @staticmethod
     def simular_deteccion_imperfecta(secuencia: np.ndarray, max_landmarks_afectados: int = 2) -> np.ndarray:
-        """
-        Degrada 1-2 landmarks en un subconjunto de frames, como si MediaPipe
-        los hubiera detectado con ruido (mano cerca del borde del encuadre,
-        oclusión parcial, mala luz). El modelo real va a encontrarse con esto
-        en producción aunque el dataset grabado no lo tenga.
-        """
         resultado = secuencia.copy()
         num_frames = len(resultado)
         n_frames_afectados = max(1, num_frames // 4)
@@ -161,9 +152,6 @@ def aplicar_augmentation_keypoints(secuencia: np.ndarray, config: Dict, es_entre
         cos_a, sin_a = float(np.cos(angulo)), float(np.sin(angulo))
 
         factor_esc = float(np.random.uniform(0.85, 1.15)) if (permite_zoom and random.random() < 0.8) else 1.0
-        # Offsets más amplios que antes (±0.04 -> ±0.08): antes solo cubrían
-        # micro-ajustes; esto simula mejor que la mano caiga en otra zona
-        # del encuadre relativa a su propia muñeca.
         off_x = float(np.random.uniform(-0.08, 0.08)) if random.random() < 0.7 else 0.0
         off_y = float(np.random.uniform(-0.08, 0.08)) if random.random() < 0.7 else 0.0
         factor_ruido = 0.015
@@ -172,12 +160,10 @@ def aplicar_augmentation_keypoints(secuencia: np.ndarray, config: Dict, es_entre
             resultado, cos_a, sin_a, factor_esc, off_x, off_y, factor_ruido
         )
 
-    # Variación de profundidad: mano más cerca/lejos de la cámara.
     if random.random() < 0.5:
         factor_z = float(np.random.uniform(0.8, 1.25))
         resultado = AumentadorKeypoints.aplicar_escala_z(resultado, factor_z)
 
-    # Ruido de detección tipo "borde de cámara / oclusión parcial".
     if random.random() < 0.3:
         resultado = AumentadorKeypoints.simular_deteccion_imperfecta(resultado)
 
@@ -275,12 +261,10 @@ class ServicioEntrenamientoUnificado:
         self.device, self.gpu_info = self._detectar_y_configurar_gpu()
         self.batch_size, self.num_frames, self.num_workers = self._configurar_recursos()
         self.weight_decay = 1e-4
-        # Optimizado para datasets pequeños (ej: 50 videos por clase)
-        self.min_videos_por_sena = 25  # Reducido de 30 a 25 para su escala
-        self.min_accuracy = 0.65      # Ligeramente más exigente para conjunto pequeño
-        self.min_accuracy_por_clase = 0.55  # umbral de aviso: si una clase baja de esto, se avisa explícitamente
-        self.frames_estaticos_modelo = 12  # Más frames para mejor precisión
-        # Parámetros optimizados para su escala específica
+        self.min_videos_por_sena = 25
+        self.min_accuracy = 0.65
+        self.min_accuracy_por_clase = 0.55
+        self.frames_estaticos_modelo = 12
         self.learning_rate_base = 0.0008
         self.epochs_base = 250
         logger.info(f"Servicio optimizado para 50 videos/clase: batch_size={self.batch_size}, min_sena_videos={self.min_videos_por_sena}, epochs={self.epochs_base}")
@@ -328,6 +312,17 @@ class ServicioEntrenamientoUnificado:
         return [{"id": int(f.id), "sena": f.sena or "sin_clasificar",
                  "ruta_video": f.ruta_video, "drive_file_id": f.drive_file_id} for f in filas]
 
+    def _cargar_videos_orm(self, ids: List[int]) -> List[VideoDataset]:
+        if not ids:
+            return []
+        db = SessionLocal()
+        try:
+            videos = db.query(VideoDataset).filter(VideoDataset.id.in_(ids)).all()
+            db.expunge_all()
+            return videos
+        finally:
+            db.close()
+
     def validar_dataset_entrenamiento(self, categoria_ids: List[int], db: Session) -> Dict[str, Any]:
         try:
             videos_db = self._obtener_videos_utilizables(categoria_ids, db)
@@ -356,9 +351,8 @@ class ServicioEntrenamientoUnificado:
             es_alfabeto = es_categoria_alfabeto(list(videos_por_sena.keys()))
             total_videos = len(videos_validos)
 
-            # Validación optimizada para su escala (50 videos/clase)
             valido = (
-                total_videos >= 40 and  # Reducido de 20 a 40 para mejor entrenamiento
+                total_videos >= 40 and
                 len(senas_con_minimo) >= 2 and
                 len(senas_sin_minimo) == 0
             )
@@ -532,7 +526,6 @@ class ServicioEntrenamientoUnificado:
         if not pendientes:
             return secuencias, senas
 
-        # Validar si suficientes videos para su escala (50 videos/clase)
         videos_por_sena = {}
         for v in videos:
             videos_por_sena[v["sena"]] = videos_por_sena.get(v["sena"], 0) + 1
@@ -560,30 +553,36 @@ class ServicioEntrenamientoUnificado:
         rutas_temporales: Dict[int, str] = {}
         if solo_drive:
             self._actualizar_progreso(nombre_modelo, mensaje=f"Descargando {len(solo_drive)} videos desde Drive...")
-            rutas_temporales = descargar_videos_temporalmente(solo_drive, carpeta_temporal=f"temp_entrenamiento_{nombre_modelo}")
+            videos_drive = self._cargar_videos_orm([v["id"] for v in solo_drive])
+            rutas_temporales = descargar_videos_temporalmente(videos_drive, carpeta_temporal=f"temp_entrenamiento_{nombre_modelo}")
 
-        for i, v in enumerate(pendientes):
-            video_id = v["id"]
-            sena = v["sena"]
-            self._actualizar_progreso(nombre_modelo, mensaje=f"Extrayendo secuencias {i + 1}/{len(pendientes)}...")
+        with ExitStack() as pila:
+            hands = None
 
-            if video_id in con_kp_cliente:
-                arrs = [np.asarray(k, dtype=np.float32) for k in con_kp_cliente[video_id]]
-                resultado = secuencia_desde_keypoints(arrs, self.num_frames)
-            else:
-                ruta = locales.get(video_id) or rutas_temporales.get(video_id)
-                if not ruta:
-                    continue
-                resultado = extraer_secuencia_landmarks(ruta, self.num_frames)
-                if resultado is None:
-                    logger.warning(f"Video {video_id} ilegible, se omite")
-                    continue
+            for i, v in enumerate(pendientes):
+                video_id = v["id"]
+                sena = v["sena"]
+                self._actualizar_progreso(nombre_modelo, mensaje=f"Extrayendo secuencias {i + 1}/{len(pendientes)}...")
 
-            self._guardar_secuencia(video_id, resultado)
+                if video_id in con_kp_cliente:
+                    arrs = [np.asarray(k, dtype=np.float32) for k in con_kp_cliente[video_id]]
+                    resultado = secuencia_desde_keypoints(arrs, self.num_frames)
+                else:
+                    ruta = locales.get(video_id) or rutas_temporales.get(video_id)
+                    if not ruta:
+                        continue
+                    if hands is None:
+                        hands = pila.enter_context(detector_para_lote())
+                    resultado = extraer_secuencia_landmarks(ruta, self.num_frames, hands=hands)
+                    if resultado is None:
+                        logger.warning(f"Video {video_id} ilegible, se omite")
+                        continue
 
-            if (resultado.estado > 0).any():
-                secuencias.append(resultado.secuencia)
-                senas.append(sena)
+                self._guardar_secuencia(video_id, resultado)
+
+                if (resultado.estado > 0).any():
+                    secuencias.append(resultado.secuencia)
+                    senas.append(sena)
 
         if len(secuencias) < 20:
             raise Exception(f"Insuficientes videos: {len(secuencias)} (mínimo 20)")
@@ -591,7 +590,12 @@ class ServicioEntrenamientoUnificado:
         logger.info(f"Dataset preparado: {len(secuencias)} secuencias, {len(set(senas))} señas únicas")
         return secuencias, senas
 
-    def entrenar(self, nombre_modelo: str, categoria_ids: List[int], epochs: int):
+    def entrenar(self, nombre_modelo: str, categoria_ids: List[int], epochs: int,
+                 desactivar_otros: bool = True):
+        """
+        desactivar_otros=True  -> al terminar, el modelo nuevo queda como único activo (comportamiento anterior).
+        desactivar_otros=False -> el modelo nuevo se activa SIN apagar los demás (modo ensemble).
+        """
         _fijar_semillas()
 
         model = train_loader = val_loader = None
@@ -643,30 +647,22 @@ class ServicioEntrenamientoUnificado:
             total_videos = len(secuencias)
             total_frames = total_videos * self.num_frames
 
-            # Para su escala específica (50 videos/clase, pocas letras):
-            # obtener hiperparámetros afinados para dataset pequeño / pocas clases
             parametros = obtener_parametros_entrenamiento_optimizados(clases)
 
             if not epochs or epochs <= 0:
-                # Solo se calcula un valor automático si NO llegó nada válido
-                # del frontend. Si el usuario pidió un número específico
-                # (p. ej. 50), se respeta tal cual, sin imponerle un piso.
                 epochs = parametros.get('epochs', self.epochs_base)
                 logger.info(f"No llegó un número de épocas válido desde la solicitud; "
                             f"se usa el valor calculado automáticamente: {epochs}")
             else:
                 epochs = int(epochs)
 
-            epochs = max(5, min(epochs, 500))  # solo evita valores absurdos (0, negativos, miles)
+            epochs = max(5, min(epochs, 500))
 
             lr = float(parametros.get('learning_rate', self.learning_rate_base))
             patience = int(parametros.get('patience', 40))
             focal_gamma = float(parametros.get('focal_gamma', 1.8))
             label_smoothing = float(parametros.get('label_smoothing', 0.015))
 
-            # El batch_size real nunca debe superar lo que soporta la GPU detectada,
-            # pero para pocas clases/pocos videos conviene el valor más chico que
-            # sugieren los parámetros optimizados (mejor señal de gradiente por paso).
             batch_size_entrenamiento = min(self.batch_size, int(parametros.get('batch_size', self.batch_size)))
 
             logger.info(f"Hiperparámetros: lr={lr}, epochs={epochs}, patience={patience}, "
@@ -799,8 +795,6 @@ class ServicioEntrenamientoUnificado:
                 avg_train_loss = train_loss / len(train_loader) if len(train_loader) > 0 else 0
                 avg_val_loss = val_loss / len(val_loader) if len(val_loader) > 0 else 0
 
-                # Accuracy por clase de esta época, para no perder de vista clases
-                # débiles (como B) aunque el accuracy global se vea bien.
                 accuracy_por_clase_epoch = {}
                 for i, clase in enumerate(clases):
                     total_clase_epoch = matriz_confusion_epoch[i].sum()
@@ -809,10 +803,6 @@ class ServicioEntrenamientoUnificado:
                     )
                 min_class_acc = min(accuracy_por_clase_epoch.values()) if accuracy_por_clase_epoch else 0.0
 
-                # Puntaje compuesto usado para elegir el mejor checkpoint: no solo el
-                # accuracy global, también qué tan mal le va a la clase más débil.
-                # Esto evita quedarnos con una época donde el accuracy total es alto
-                # pero una letra (ej. B) sigue mal reconocida.
                 score_compuesto = 0.6 * val_acc + 0.4 * min_class_acc
 
                 self._actualizar_progreso(
@@ -875,7 +865,8 @@ class ServicioEntrenamientoUnificado:
             db_final = SessionLocal()
             try:
                 self._actualizar_bd(db_final, nombre_modelo, str(ruta_modelo), clases,
-                                     best_accuracy, epochs, total_videos)
+                                     best_accuracy, epochs, total_videos,
+                                     desactivar_otros=desactivar_otros)
             finally:
                 db_final.close()
 
@@ -938,7 +929,8 @@ class ServicioEntrenamientoUnificado:
         return ruta_modelo
 
     def _actualizar_bd(self, db: Session, nombre_modelo: str, ruta_modelo: str,
-                        clases: List[str], accuracy: float, epochs: int, total_videos: int):
+                        clases: List[str], accuracy: float, epochs: int, total_videos: int,
+                        desactivar_otros: bool = True):
         ultimo_error = None
 
         for intento in range(3):
@@ -952,6 +944,7 @@ class ServicioEntrenamientoUnificado:
                         descripcion=f"Modelo LSTM keypoints 256x2, {len(clases)} señas, {total_videos} videos, "
                                     f"accuracy: {accuracy * 100:.2f}%",
                         ruta_archivo=ruta_modelo,
+                        tipo_modelo="LSTM",
                         accuracy=round(float(accuracy), 6),
                         num_clases=len(clases),
                         clases_json=json.dumps(clases, ensure_ascii=False),
@@ -968,6 +961,7 @@ class ServicioEntrenamientoUnificado:
                     db.flush()
                 else:
                     modelo_db.ruta_archivo = ruta_modelo
+                    modelo_db.tipo_modelo = "LSTM"
                     modelo_db.accuracy = round(float(accuracy), 6)
                     modelo_db.num_clases = len(clases)
                     modelo_db.clases_json = json.dumps(clases, ensure_ascii=False)
@@ -980,14 +974,15 @@ class ServicioEntrenamientoUnificado:
                     modelo_db.version = "11.0"
                     modelo_db.num_frames = self.num_frames
 
-                db.query(ModeloIA).filter(
-                    ModeloIA.activo == True,
-                    ModeloIA.id != modelo_db.id
-                ).update({"activo": False}, synchronize_session=False)
+                if desactivar_otros:
+                    db.query(ModeloIA).filter(
+                        ModeloIA.activo == True,
+                        ModeloIA.id != modelo_db.id
+                    ).update({"activo": False}, synchronize_session=False)
 
                 db.commit()
                 db.refresh(modelo_db)
-                logger.info(f"Modelo {nombre_modelo} activado (id={modelo_db.id})")
+                logger.info(f"Modelo {nombre_modelo} activado (id={modelo_db.id}, desactivar_otros={desactivar_otros})")
                 return
 
             except Exception as e:

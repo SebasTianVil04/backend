@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func, and_
+from sqlalchemy import func
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import logging
 
 from ..utilidades.base_datos import obtener_bd
-from ..utilidades.seguridad import verificar_admin
+from ..dependencias.permisos import requiere_permiso
 from ..modelos.examen import Examen, PreguntaExamen, ResultadoExamen
 from ..modelos.usuario import Usuario
 from ..modelos.leccion import Leccion
@@ -15,6 +15,8 @@ from ..esquemas.respuesta_schemas import RespuestaAPI, RespuestaLista
 
 router = APIRouter(prefix="", tags=["Admin - Exámenes"])
 logger = logging.getLogger(__name__)
+
+PERMISO_ADMIN_EXAMENES = "admin.examenes.gestionar"
 
 
 class ExamenCrear(BaseModel):
@@ -71,9 +73,8 @@ class PreguntaActualizar(BaseModel):
 async def crear_examen(
     examen: ExamenCrear,
     db: Session = Depends(obtener_bd),
-    admin = Depends(verificar_admin)
+    admin: Usuario = Depends(requiere_permiso(PERMISO_ADMIN_EXAMENES))
 ):
-    """Crear un nuevo examen"""
     try:
         if examen.tipo == 'nivel' and examen.nivel is None:
             raise HTTPException(
@@ -136,9 +137,8 @@ async def listar_examenes_admin(
     activo: Optional[bool] = None,
     leccion_id: Optional[int] = None,
     db: Session = Depends(obtener_bd),
-    admin = Depends(verificar_admin)
+    admin: Usuario = Depends(requiere_permiso(PERMISO_ADMIN_EXAMENES))
 ):
-    """Listar todos los exámenes (admin)"""
     try:
         query = db.query(Examen)
 
@@ -189,9 +189,8 @@ async def listar_examenes_admin(
 async def obtener_examen_admin(
     examen_id: int,
     db: Session = Depends(obtener_bd),
-    admin = Depends(verificar_admin)
+    admin: Usuario = Depends(requiere_permiso(PERMISO_ADMIN_EXAMENES))
 ):
-    """Obtener detalles completos de un examen"""
     examen = db.query(Examen).filter(Examen.id == examen_id).first()
 
     if not examen:
@@ -247,9 +246,8 @@ async def actualizar_examen(
     examen_id: int,
     datos: ExamenActualizar,
     db: Session = Depends(obtener_bd),
-    admin = Depends(verificar_admin)
+    admin: Usuario = Depends(requiere_permiso(PERMISO_ADMIN_EXAMENES))
 ):
-    """Actualizar un examen"""
     try:
         examen = db.query(Examen).filter(Examen.id == examen_id).first()
 
@@ -310,9 +308,8 @@ async def actualizar_examen(
 async def eliminar_examen(
     examen_id: int,
     db: Session = Depends(obtener_bd),
-    admin = Depends(verificar_admin)
+    admin: Usuario = Depends(requiere_permiso(PERMISO_ADMIN_EXAMENES))
 ):
-    """Eliminar un examen"""
     try:
         examen = db.query(Examen).filter(Examen.id == examen_id).first()
 
@@ -339,15 +336,12 @@ async def eliminar_examen(
         )
 
 
-# ===== GESTIÓN DE PREGUNTAS =====
-
 @router.post("/preguntas", response_model=RespuestaAPI)
 async def crear_pregunta(
     pregunta: PreguntaCrear,
     db: Session = Depends(obtener_bd),
-    admin = Depends(verificar_admin)
+    admin: Usuario = Depends(requiere_permiso(PERMISO_ADMIN_EXAMENES))
 ):
-    """Crear una nueva pregunta para un examen"""
     try:
         examen = db.query(Examen).filter(Examen.id == pregunta.examen_id).first()
         if not examen:
@@ -381,9 +375,8 @@ async def actualizar_pregunta(
     pregunta_id: int,
     datos: PreguntaActualizar,
     db: Session = Depends(obtener_bd),
-    admin = Depends(verificar_admin)
+    admin: Usuario = Depends(requiere_permiso(PERMISO_ADMIN_EXAMENES))
 ):
-    """Actualizar una pregunta"""
     try:
         pregunta = db.query(PreguntaExamen).filter(
             PreguntaExamen.id == pregunta_id
@@ -420,9 +413,8 @@ async def actualizar_pregunta(
 async def eliminar_pregunta(
     pregunta_id: int,
     db: Session = Depends(obtener_bd),
-    admin = Depends(verificar_admin)
+    admin: Usuario = Depends(requiere_permiso(PERMISO_ADMIN_EXAMENES))
 ):
-    """Eliminar una pregunta"""
     try:
         pregunta = db.query(PreguntaExamen).filter(
             PreguntaExamen.id == pregunta_id
@@ -455,9 +447,8 @@ async def eliminar_pregunta(
 async def listar_preguntas_examen(
     examen_id: int,
     db: Session = Depends(obtener_bd),
-    admin = Depends(verificar_admin)
+    admin: Usuario = Depends(requiere_permiso(PERMISO_ADMIN_EXAMENES))
 ):
-    """Listar todas las preguntas de un examen"""
     try:
         preguntas = db.query(PreguntaExamen).filter(
             PreguntaExamen.examen_id == examen_id
@@ -499,9 +490,8 @@ async def listar_preguntas_examen(
 async def obtener_estadisticas_examen(
     examen_id: int,
     db: Session = Depends(obtener_bd),
-    admin = Depends(verificar_admin)
+    admin: Usuario = Depends(requiere_permiso(PERMISO_ADMIN_EXAMENES))
 ):
-    """Obtener estadísticas reales de los intentos de examen"""
     try:
         examen = db.query(Examen).filter(Examen.id == examen_id).first()
         if not examen:
@@ -551,7 +541,7 @@ async def obtener_estadisticas_examen(
         for resultado, usuario in intentos_recientes:
             intentos_recientes_data.append({
                 "usuario_id": usuario.id,
-                "usuario_nombre": usuario.nombre_completo,
+                "usuario_nombre": usuario.nombre_usuario,
                 "usuario_email": usuario.email,
                 "puntuacion": resultado.porcentaje,
                 "puntuacion_obtenida": resultado.puntuacion_obtenida,

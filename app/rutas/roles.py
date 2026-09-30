@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from ..dependencias.permisos import requiere_permiso
 from ..esquemas.rol_schemas import (
     AsignarPermisosRequest,
+    PermisoActualizar,
+    PermisoCrear,
     PermisoRespuesta,
     RolActualizar,
     RolCrear,
@@ -17,6 +19,8 @@ from ..utilidades.base_datos import obtener_bd
 router = APIRouter(prefix="/api/v1/roles", tags=["Roles"])
 
 ROL_PROTEGIDO = "admin"
+
+MODULOS_RESERVADOS = {"admin_usuarios", "admin_roles", "admin_menu"}
 
 
 @router.get("", response_model=List[RolRespuesta])
@@ -33,6 +37,77 @@ async def listar_permisos(
     _=Depends(requiere_permiso("admin.roles.gestionar")),
 ):
     return db.query(Permiso).order_by(Permiso.modulo, Permiso.codigo).all()
+
+
+@router.post("/permisos", response_model=PermisoRespuesta, status_code=status.HTTP_201_CREATED)
+async def crear_permiso(
+    datos: PermisoCrear,
+    db: Session = Depends(obtener_bd),
+    _=Depends(requiere_permiso("admin.roles.gestionar")),
+):
+    codigo = datos.codigo.strip().lower()
+    modulo = datos.modulo.strip().lower()
+
+    if db.query(Permiso).filter(Permiso.codigo == codigo).first():
+        raise HTTPException(status_code=400, detail=f"Ya existe un permiso con código '{codigo}'")
+
+    nuevo = Permiso(
+        codigo=codigo,
+        modulo=modulo,
+        descripcion=datos.descripcion.strip(),
+    )
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    return nuevo
+
+
+@router.put("/permisos/{permiso_id}", response_model=PermisoRespuesta)
+async def actualizar_permiso(
+    permiso_id: int,
+    datos: PermisoActualizar,
+    db: Session = Depends(obtener_bd),
+    _=Depends(requiere_permiso("admin.roles.gestionar")),
+):
+    permiso = db.query(Permiso).filter(Permiso.id == permiso_id).first()
+    if not permiso:
+        raise HTTPException(status_code=404, detail="Permiso no encontrado")
+
+    if datos.modulo is not None:
+        permiso.modulo = datos.modulo.strip().lower()
+    if datos.descripcion is not None:
+        permiso.descripcion = datos.descripcion.strip()
+
+    db.commit()
+    db.refresh(permiso)
+    return permiso
+
+
+@router.delete("/permisos/{permiso_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def eliminar_permiso(
+    permiso_id: int,
+    db: Session = Depends(obtener_bd),
+    _=Depends(requiere_permiso("admin.roles.gestionar")),
+):
+    permiso = db.query(Permiso).filter(Permiso.id == permiso_id).first()
+    if not permiso:
+        raise HTTPException(status_code=404, detail="Permiso no encontrado")
+
+    if permiso.modulo in MODULOS_RESERVADOS:
+        raise HTTPException(
+            status_code=400,
+            detail="No se puede eliminar un permiso de un módulo del sistema",
+        )
+
+    roles_afectados = list(getattr(permiso, "roles", []) or [])
+    for rol in roles_afectados:
+        try:
+            rol.permisos.remove(permiso)
+        except (ValueError, AttributeError):
+            pass
+
+    db.delete(permiso)
+    db.commit()
 
 
 @router.post("", response_model=RolRespuesta, status_code=status.HTTP_201_CREATED)

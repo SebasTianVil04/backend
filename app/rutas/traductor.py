@@ -9,10 +9,12 @@ from sqlalchemy.orm import Session
 
 from ..utilidades.base_datos import obtener_bd
 from ..utilidades.seguridad import obtener_usuario_actual
+from ..dependencias.permisos import requiere_permiso
 from ..modelos.usuario import Usuario
 from ..esquemas.respuesta_schemas import RespuestaAPI
 from ..servicios.gestor_reconocimiento import (
     obtener_reconocedor,
+    obtener_reconocedor_por_modelo,
     determinar_tipo_sena,
     procesar_frame_base64,
     limpiar_cache,
@@ -66,6 +68,14 @@ def _landmarks_a_fila(landmarks: Any) -> Optional[np.ndarray]:
         return fila
 
 
+def _a_entero_positivo(valor: Any) -> Optional[int]:
+    try:
+        numero = int(valor)
+    except (TypeError, ValueError):
+        return None
+    return numero if numero > 0 else None
+
+
 def _evaluar_calidad_confianza(confianza: float, confianza_minima: float, sena: str):
     if confianza >= 0.80:
         return "excelente", f"Alta confianza: {sena}"
@@ -93,6 +103,9 @@ async def traducir_senas_a_texto(
         sena_esperada = data.get("sena_esperada")
         configuracion = data.get("configuracion", {}) or {}
         categoria_id = data.get("categoria_id", configuracion.get("categoria_id"))
+        modelo_id_solicitado = _a_entero_positivo(
+            data.get("modelo_id", configuracion.get("modelo_id"))
+        )
         confianza_minima = float(configuracion.get("confianza_minima", 0.25))
 
         if not frames_base64 and not imagen_base64:
@@ -124,7 +137,19 @@ async def traducir_senas_a_texto(
                 if fila is not None:
                     keypoints_cliente.append(fila)
 
-        reconocedor, modelo_id = obtener_reconocedor(bd, categoria_id)
+        # Si el usuario eligió un modelo concreto se usa ese; si no, el de la categoría
+        # o el activo más reciente (comportamiento anterior).
+        try:
+            if modelo_id_solicitado:
+                reconocedor, modelo_id = obtener_reconocedor_por_modelo(bd, modelo_id_solicitado)
+            else:
+                reconocedor, modelo_id = obtener_reconocedor(bd, categoria_id)
+        except ValueError as e:
+            return RespuestaAPI(
+                exito=False,
+                mensaje=str(e),
+                datos={"confianza": 0.0, "sena_detectada": ""}
+            )
 
         usar_landmarks = len(keypoints_cliente) >= MIN_FRAMES_CON_MANOS
 
@@ -212,11 +237,17 @@ async def traducir_senas_a_texto(
             "tiempo_procesamiento_ms": round(processing_time * 1000, 2),
             "fuente_keypoints": "cliente" if usar_landmarks else "servidor",
             "modelo_usado": modelo_id,
+            "seleccion_manual": bool(modelo_id_solicitado),
             "categoria_id": categoria_id,
             "extractor_version": reconocedor.extractor_version,
             "alternativas": alternativas,
             "timestamp": datetime.now().isoformat()
         }
+
+        logger.info(
+            f"Traducción [Modelo:{modelo_id}{' (manual)' if modelo_id_solicitado else ''}] "
+            f"{sena_detectada} ({confianza * 100:.1f}%)"
+        )
 
         return RespuestaAPI(
             exito=True,
@@ -300,7 +331,7 @@ async def probar_todos_modelos(
 @router.post("/limpiar-cache")
 async def limpiar_cache_traductor(
     modelo_id: Optional[int] = None,
-    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar"))
 ):
     try:
         mensaje = limpiar_cache(modelo_id)

@@ -1,7 +1,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from sqlalchemy.orm import Session, selectinload
+from pydantic import BaseModel, ConfigDict
 
 from ..utilidades.base_datos import obtener_bd
 from ..dependencias.permisos import requiere_permiso
@@ -22,14 +22,13 @@ class MenuItemIn(BaseModel):
 
 
 class MenuItemOut(MenuItemIn):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     hijos: List["MenuItemOut"] = []
 
-    class Config:
-        from_attributes = True
 
-
-MenuItemOut.update_forward_refs()
+MenuItemOut.model_rebuild()
 
 
 @router.get("", response_model=List[MenuItemOut])
@@ -39,6 +38,7 @@ def listar_menu_completo(
 ):
     return (
         db.query(MenuItem)
+        .options(selectinload(MenuItem.hijos, recursion_depth=-1))
         .filter(MenuItem.padre_id.is_(None))
         .order_by(MenuItem.orden)
         .all()
@@ -51,7 +51,7 @@ def crear_item(
     db: Session = Depends(obtener_bd),
     _=Depends(requiere_permiso("admin.menu.gestionar")),
 ):
-    item = MenuItem(**datos.dict())
+    item = MenuItem(**datos.model_dump())
     db.add(item)
     db.commit()
     db.refresh(item)
@@ -65,11 +65,11 @@ def actualizar_item(
     db: Session = Depends(obtener_bd),
     _=Depends(requiere_permiso("admin.menu.gestionar")),
 ):
-    item = db.query(MenuItem).get(item_id)
+    item = db.get(MenuItem, item_id)
     if not item:
-        raise HTTPException(404, "Ítem no encontrado")
-    for k, v in datos.dict().items():
-        setattr(item, k, v)
+        raise HTTPException(status_code=404, detail="Ítem no encontrado")
+    for campo, valor in datos.model_dump().items():
+        setattr(item, campo, valor)
     db.commit()
     db.refresh(item)
     return item
@@ -81,8 +81,8 @@ def eliminar_item(
     db: Session = Depends(obtener_bd),
     _=Depends(requiere_permiso("admin.menu.gestionar")),
 ):
-    item = db.query(MenuItem).get(item_id)
+    item = db.get(MenuItem, item_id)
     if not item:
-        raise HTTPException(404, "Ítem no encontrado")
+        raise HTTPException(status_code=404, detail="Ítem no encontrado")
     db.delete(item)
     db.commit()

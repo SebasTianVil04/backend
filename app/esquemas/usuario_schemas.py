@@ -76,6 +76,12 @@ class UsuarioRespuesta(BaseModel):
     class Config:
         from_attributes = True
 
+class SesionRespuesta(BaseModel):
+    """Respuesta de login/refresh: ya no expone el access_token (va en cookie HttpOnly)."""
+    usuario: UsuarioRespuesta
+
+    class Config:
+        from_attributes = True
 
 class UsuarioActualizacion(BaseModel):
     nombre_usuario: Optional[str] = None
@@ -161,11 +167,6 @@ class VerificarEmailResponse(BaseModel):
     activo: Optional[bool] = None
     mensaje: str
 
-
-class TokenRespuesta(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
-    usuario: UsuarioRespuesta
 
 
 class DatosApiperu(BaseModel):

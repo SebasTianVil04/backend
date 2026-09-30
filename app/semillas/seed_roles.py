@@ -3,32 +3,52 @@ from typing import Dict, List, Union
 
 from sqlalchemy.orm import Session
 
-from ..modelos.rol import Rol, Permiso
+from ..modelos.rol import Permiso, Rol
 from ..utilidades.permisos_catalogo import codigos_validos
 
 logger = logging.getLogger(__name__)
 
+PERMISOS_BASE: List[str] = [
+    "lecciones.ver",
+    "practicas.registrar",
+    "examenes.ver",
+    "progreso.ver",
+    "categorias.ver",
+    "clases.ver",
+]
 
 ROLES_SISTEMA: List[Dict[str, Union[str, List[str]]]] = [
     {
         "codigo": "usuario",
         "nombre": "Usuario",
         "descripcion": "Usuario estándar con acceso a lecciones, exámenes y su progreso",
+        "permisos": [],
+    },
+    {
+        "codigo": "editor",
+        "nombre": "Editor",
+        "descripcion": "Gestiona contenido del sistema (categorías, lecciones, clases, tipos)",
         "permisos": [
-            "usuarios.ver_perfil",
-            "usuarios.editar_perfil",
-            "usuarios.ver_progreso",
-            "lecciones.ver",
-            "clases.ver",
-            "examenes.ver",
-            "categorias.ver",
-            "reconocimiento.usar",
-            "practicas.registrar",
-            "practicas.ver_historial",
-            "progreso.ver",
-            "progreso.registrar",
-            "estudio.registrar",
-            "estudio.ver",
+            "categorias.gestionar_senas",
+            "admin.categorias.gestionar",
+            "admin.lecciones.gestionar",
+            "admin.examenes.gestionar",
+            "tipos_categoria.gestionar",
+            "clases.crear",
+            "clases.editar",
+        ],
+    },
+    {
+        "codigo": "entrenador",
+        "nombre": "Entrenador",
+        "descripcion": "Gestiona el dataset y los modelos IA",
+        "permisos": [
+            "dataset.ver",
+            "dataset.categorias.gestionar",
+            "dataset.videos.gestionar",
+            "modelos.ver",
+            "modelos.gestionar",
+            "captura.gestionar",
         ],
     },
     {
@@ -47,8 +67,7 @@ def _resolver_permisos(db: Session, codigos: List[str]) -> List[Permiso]:
     invalidos = set(codigos) - codigos_validos()
     if invalidos:
         logger.warning(
-            "seed_roles: códigos de permiso no encontrados en el catálogo (revisa "
-            "permisos_catalogo.py, probablemente un typo): %s",
+            "seed_roles: códigos NO presentes en el catálogo (revisa permisos_catalogo.py): %s",
             sorted(invalidos),
         )
 
@@ -77,8 +96,19 @@ def seed_roles(db: Session) -> None:
 
             if data["permisos"] == "*":
                 rol.permisos = db.query(Permiso).all()
-            else:
-                rol.permisos = _resolver_permisos(db, data["permisos"])
+                continue
+
+            requeridos = list(dict.fromkeys(PERMISOS_BASE + list(data["permisos"])))
+            actuales = {permiso.codigo for permiso in rol.permisos}
+            faltantes = [p for p in _resolver_permisos(db, requeridos) if p.codigo not in actuales]
+
+            if faltantes:
+                rol.permisos.extend(faltantes)
+                logger.info(
+                    "Rol '%s': permisos agregados %s",
+                    data["codigo"],
+                    sorted(p.codigo for p in faltantes),
+                )
 
         db.commit()
         logger.info("Seed roles: %d roles sincronizados", len(ROLES_SISTEMA))

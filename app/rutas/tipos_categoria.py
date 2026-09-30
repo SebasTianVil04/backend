@@ -3,7 +3,8 @@ from sqlalchemy.orm import Session
 from typing import List, Dict
 
 from ..utilidades.base_datos import obtener_bd
-from ..utilidades.seguridad import verificar_admin
+from ..utilidades.seguridad import obtener_usuario_actual
+from ..dependencias.permisos import requiere_permiso
 from ..modelos.usuario import Usuario
 from ..modelos.tipo_categoria import TipoCategoria
 from ..modelos.categoria import Categoria
@@ -16,11 +17,14 @@ from ..esquemas.respuestas import RespuestaAPI
 
 router = APIRouter(prefix="/tipos-categoria", tags=["Tipos de Categoría"])
 
+PERMISO_GESTION = "tipos_categoria.gestionar"
+
 
 @router.get("", response_model=List[Dict])
 async def listar_tipos_categoria(
     solo_activos: bool = True,
-    db: Session = Depends(obtener_bd)
+    db: Session = Depends(obtener_bd),
+    usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
     try:
         query = db.query(TipoCategoria)
@@ -54,7 +58,8 @@ async def listar_tipos_categoria(
 @router.get("/{tipo_id}", response_model=RespuestaAPI)
 async def obtener_tipo_categoria(
     tipo_id: int,
-    db: Session = Depends(obtener_bd)
+    db: Session = Depends(obtener_bd),
+    usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
     try:
         tipo = db.query(TipoCategoria).filter(TipoCategoria.id == tipo_id).first()
@@ -93,7 +98,7 @@ async def obtener_tipo_categoria(
 async def crear_tipo_categoria(
     datos: TipoCategoriaCrear,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION))
 ):
     try:
         existe = db.query(TipoCategoria).filter(
@@ -148,7 +153,7 @@ async def actualizar_tipo_categoria(
     tipo_id: int,
     datos: TipoCategoriaActualizar,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION))
 ):
     try:
         tipo = db.query(TipoCategoria).filter(TipoCategoria.id == tipo_id).first()
@@ -196,7 +201,7 @@ async def actualizar_tipo_categoria(
 async def eliminar_tipo_categoria(
     tipo_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION))
 ):
     try:
         tipo = db.query(TipoCategoria).filter(TipoCategoria.id == tipo_id).first()
@@ -239,7 +244,7 @@ async def eliminar_tipo_categoria(
 async def cambiar_estado_tipo(
     tipo_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION))
 ):
     try:
         tipo = db.query(TipoCategoria).filter(TipoCategoria.id == tipo_id).first()

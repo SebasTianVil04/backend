@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from ..utilidades.base_datos import obtener_bd
-from ..utilidades.seguridad import obtener_usuario_actual, verificar_admin
+from ..utilidades.seguridad import obtener_usuario_actual
+from ..dependencias.permisos import requiere_permiso
 from ..modelos.usuario import Usuario
 from ..modelos.categoria import Categoria
 from ..modelos.sena_categoria import SenaCategoria
@@ -23,6 +24,8 @@ EXTENSIONES_PERMITIDAS = EXTENSIONES_IMAGEN | EXTENSIONES_VIDEO
 
 MAX_TAMANO_IMAGEN = 5 * 1024 * 1024
 MAX_TAMANO_VIDEO = 25 * 1024 * 1024
+
+PERMISO_GESTION_SENAS = "categorias.gestionar_senas"
 
 
 def _obtener_categoria_o_404(categoria_id: int, db: Session) -> Categoria:
@@ -76,7 +79,7 @@ def crear_sena(
     categoria_id: int,
     sena: SenaCategoriaCrear,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION_SENAS))
 ):
     _obtener_categoria_o_404(categoria_id, db)
 
@@ -110,7 +113,7 @@ def actualizar_sena(
     sena_id: int,
     datos_actualizar: SenaCategoriaActualizar,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION_SENAS))
 ):
     sena = db.query(SenaCategoria).filter(
         SenaCategoria.id == sena_id, SenaCategoria.categoria_id == categoria_id
@@ -133,7 +136,7 @@ def eliminar_sena(
     categoria_id: int,
     sena_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION_SENAS))
 ):
     sena = db.query(SenaCategoria).filter(
         SenaCategoria.id == sena_id, SenaCategoria.categoria_id == categoria_id
@@ -162,7 +165,7 @@ async def subir_archivo_referencia(
     sena_id: int,
     archivo: UploadFile = File(...),
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION_SENAS))
 ):
     sena = db.query(SenaCategoria).filter(
         SenaCategoria.id == sena_id, SenaCategoria.categoria_id == categoria_id
@@ -221,7 +224,7 @@ def eliminar_archivo_referencia(
     categoria_id: int,
     sena_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(verificar_admin)
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION_SENAS))
 ):
     sena = db.query(SenaCategoria).filter(
         SenaCategoria.id == sena_id, SenaCategoria.categoria_id == categoria_id

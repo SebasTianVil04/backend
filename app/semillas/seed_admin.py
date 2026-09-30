@@ -3,13 +3,13 @@ import os
 import sys
 
 from dotenv import load_dotenv
-load_dotenv()
-
 from sqlalchemy.orm import Session
 
 from ..modelos.rol import Rol
 from ..modelos.usuario import Usuario
 from ..utilidades.seguridad import obtener_hash_password
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,7 @@ def seed_admin(db: Session) -> None:
     faltantes = [k for k, v in requeridas.items() if not v]
     if faltantes:
         logger.warning(
-            "Seed admin omitido: faltan variables de entorno %s. "
-            "Configúralas y vuelve a ejecutar el seed si necesitas crear el admin.",
+            "Seed admin omitido: faltan variables %s. Configúralas y vuelve a ejecutar.",
             faltantes,
         )
         return
@@ -46,12 +45,17 @@ def seed_admin(db: Session) -> None:
         )
         return
 
+    if password == _ADMIN_PASSWORD_DEFAULT:
+        logger.warning(
+            "Estás usando la contraseña por defecto del admin. Cámbiala en .env "
+            "antes de desplegar a producción."
+        )
+
     try:
         rol_admin = db.query(Rol).filter(Rol.codigo == "admin").first()
         if not rol_admin:
             raise ValueError(
-                "No existe el rol 'admin' en la tabla roles. "
-                "Ejecuta seed_roles antes de seed_admin."
+                "No existe el rol 'admin'. Ejecuta seed_roles antes de seed_admin."
             )
 
         email_normalizado = email.strip().lower()

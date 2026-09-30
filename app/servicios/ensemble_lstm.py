@@ -34,7 +34,6 @@ class LSTMEnsemblePredictor:
         self.db = db
         self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.modelos_cargados: Dict[str, Dict] = {}
-        self.clases_referencia: Optional[List[str]] = None
         self.cargar_modelos_activos()
 
     def cargar_modelos_activos(self):
@@ -63,17 +62,7 @@ class LSTMEnsemblePredictor:
             return
 
         modelo, metadata = cargar_modelo_adaptativo(str(ruta_modelo), self.device)
-
         clases = metadata['clases']
-
-        if self.clases_referencia is None:
-            self.clases_referencia = clases
-        elif set(clases) != set(self.clases_referencia):
-            logger.error(
-                f" Modelo {modelo_db.nombre} tiene clases distintas al resto del ensemble "
-                f"({clases} vs {self.clases_referencia}); se omite para evitar mezclar predicciones incompatibles"
-            )
-            return
 
         accuracy = modelo_db.accuracy if modelo_db.accuracy is not None else metadata.get('accuracy', 0.5)
         peso = modelo_db.peso_ensemble if modelo_db.peso_ensemble is not None else 1.0
@@ -87,7 +76,7 @@ class LSTMEnsemblePredictor:
             'num_frames': metadata.get('num_frames', 20)
         }
 
-        logger.info(f" Modelo cargado: {modelo_db.nombre} (peso: {peso}, acc: {accuracy:.4f})")
+        logger.info(f" Modelo cargado: {modelo_db.nombre} (peso: {peso}, acc: {accuracy:.4f}, clases: {len(clases)})")
 
     @torch.no_grad()
     def predecir_ensemble(
@@ -159,22 +148,28 @@ class LSTMEnsemblePredictor:
         return resultado
 
     def _weighted_average(self, predicciones: Dict, top_k: int) -> Dict:
-        suma_ponderada = None
+        # Unión de todas las clases de todos los modelos
+        clases_union = set()
+        for info in predicciones.values():
+            clases_union.update(info['clases'])
+        clases_union = sorted(clases_union)
+        idx_union = {c: i for i, c in enumerate(clases_union)}
+
+        suma_ponderada = np.zeros(len(clases_union), dtype=np.float64)
         suma_pesos = 0.0
-        clases_referencia = None
 
         for nombre, info in predicciones.items():
             peso_final = max(info['peso'] * info['accuracy'], 1e-6)
             probs = info['probabilidades']
+            clases_modelo = info['clases']
 
-            if clases_referencia is None:
-                clases_referencia = info['clases']
+            probs_union = np.zeros(len(clases_union), dtype=np.float64)
+            for j, clase in enumerate(clases_modelo):
+                destino = idx_union.get(clase)
+                if destino is not None:
+                    probs_union[destino] = float(probs[j])
 
-            if suma_ponderada is None:
-                suma_ponderada = probs * peso_final
-            else:
-                suma_ponderada += probs * peso_final
-
+            suma_ponderada += probs_union * peso_final
             suma_pesos += peso_final
 
         probabilidades_finales = suma_ponderada / suma_pesos
@@ -184,57 +179,49 @@ class LSTMEnsemblePredictor:
 
         return {
             'clase_idx': int(top_indices[0]),
-            'clase': clases_referencia[top_indices[0]] if clases_referencia else str(top_indices[0]),
+            'clase': clases_union[top_indices[0]],
             'confianza': float(probabilidades_finales[top_indices[0]]),
             'top_predicciones': [
                 {
-                    'clase': clases_referencia[idx] if clases_referencia else str(idx),
+                    'clase': clases_union[idx],
                     'probabilidad': float(probabilidades_finales[idx])
                 }
                 for idx in top_indices
             ],
+            'clases_union': clases_union,
             'metodo': 'weighted_average',
             'num_modelos': len(predicciones)
         }
 
     def _majority_voting(self, predicciones: Dict, top_k: int) -> Dict:
-        votos = {}
-        clases_referencia = None
+        votos: Dict[str, float] = {}
+        confianzas_por_clase: Dict[str, List[float]] = {}
 
         for nombre, info in predicciones.items():
-            clase_idx = info['clase_idx']
+            clase = info['clases'][info['clase_idx']]
             peso = max(info['peso'] * info['accuracy'], 1e-6)
-
-            if clases_referencia is None:
-                clases_referencia = info['clases']
-
-            votos[clase_idx] = votos.get(clase_idx, 0) + peso
+            votos[clase] = votos.get(clase, 0.0) + peso
+            confianzas_por_clase.setdefault(clase, []).append(info['confianza'])
 
         top_k = min(top_k, len(votos))
         clases_ordenadas = sorted(votos.items(), key=lambda x: x[1], reverse=True)[:top_k]
 
-        clase_ganadora_idx = clases_ordenadas[0][0]
-
-        confianzas = [
-            info['confianza']
-            for info in predicciones.values()
-            if info['clase_idx'] == clase_ganadora_idx
-        ]
-        confianza_promedio = np.mean(confianzas) if confianzas else 0.0
+        clase_ganadora = clases_ordenadas[0][0]
+        confianza_promedio = float(np.mean(confianzas_por_clase[clase_ganadora]))
 
         suma_votos = sum(votos.values()) or 1e-6
 
         return {
-            'clase_idx': int(clase_ganadora_idx),
-            'clase': clases_referencia[clase_ganadora_idx] if clases_referencia else str(clase_ganadora_idx),
-            'confianza': float(confianza_promedio),
+            'clase_idx': 0,
+            'clase': clase_ganadora,
+            'confianza': confianza_promedio,
             'top_predicciones': [
                 {
-                    'clase': clases_referencia[idx] if clases_referencia else str(idx),
-                    'votos': float(votos_val),
-                    'probabilidad': float(votos_val / suma_votos)
+                    'clase': clase,
+                    'votos': float(v),
+                    'probabilidad': float(v / suma_votos)
                 }
-                for idx, votos_val in clases_ordenadas
+                for clase, v in clases_ordenadas
             ],
             'metodo': 'majority_voting',
             'num_modelos': len(predicciones)
@@ -270,5 +257,4 @@ class LSTMEnsemblePredictor:
 
     def recargar_modelos(self):
         self.modelos_cargados.clear()
-        self.clases_referencia = None
         self.cargar_modelos_activos()

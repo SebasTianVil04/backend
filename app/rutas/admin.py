@@ -5,11 +5,10 @@ import time
 import json
 import logging
 import threading
-from datetime import datetime, date
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, BackgroundTasks
-from fastapi.security import HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import func, and_
 from sqlalchemy.orm import Session
@@ -29,15 +28,10 @@ from app.servicios.dataset_service import dataset_service
 from app.servicios.archivos import archivo_service
 from app.esquemas.usuario_schemas import UsuarioRespuesta, EstadisticasUsuario
 from app.esquemas.respuesta_schemas import RespuestaAPI
-from app.utilidades.validaciones import validar_longitud_telefono_por_pais, validar_telefono_unico
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/admin",
-    tags=["Administracion"],
-    dependencies=[Depends(HTTPBearer())]
-)
+router = APIRouter(prefix="/admin", tags=["Administracion"])
 
 _lock_inicio_entrenamiento = threading.Lock()
 
@@ -45,6 +39,7 @@ _lock_inicio_entrenamiento = threading.Lock()
 class ActivarModeloRequest(BaseModel):
     modelo_id: Optional[int] = None
     nombre_modelo: Optional[str] = None
+    exclusivo: bool = True
 
 
 class ActivarMultiplesRequest(BaseModel):
@@ -55,6 +50,7 @@ class ActivarMultiplesRequest(BaseModel):
 class IniciarEntrenamientoRequest(BaseModel):
     categoria_ids: Optional[List[int]] = None
     epochs: int = 150
+    desactivar_otros: bool = True
 
 
 def _liberar_memoria() -> None:
@@ -199,12 +195,8 @@ def obtener_dashboard(
     bd: Session = Depends(obtener_bd)
 ):
     try:
-        fecha_inicio_mes = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
         total_usuarios = bd.query(Usuario).count()
         usuarios_activos = bd.query(Usuario).filter(Usuario.activo == True).count()
-
-        usuarios_nuevos_mes = 0
 
         total_lecciones = bd.query(Leccion).count()
         lecciones_activas = bd.query(Leccion).filter(Leccion.activa == True).count()
@@ -225,7 +217,7 @@ def obtener_dashboard(
             "usuarios": {
                 "total": total_usuarios,
                 "activos": usuarios_activos,
-                "nuevos_mes": usuarios_nuevos_mes
+                "nuevos_mes": 0
             },
             "lecciones": {
                 "total": total_lecciones,
@@ -644,7 +636,7 @@ def cambiar_estado_usuario(
 async def subir_contenido_leccion(
     leccion_id: int,
     archivo: UploadFile = File(...),
-    usuario_actual: Usuario = Depends(requiere_permiso("lecciones.editar")),
+    usuario_actual: Usuario = Depends(requiere_permiso("admin.lecciones.gestionar")),
     bd: Session = Depends(obtener_bd)
 ):
     leccion = bd.query(Leccion).filter(Leccion.id == leccion_id).first()
@@ -704,7 +696,7 @@ def iniciar_entrenamiento_modelo(
                     f"Dataset insuficiente: {validacion.get('total_videos', 0)} videos válidos y "
                     f"{len(validacion.get('senas_con_minimo', []))} señas con al menos "
                     f"{servicio_entrenamiento.min_videos_por_sena} videos "
-                    f"(se requieren 20 videos y 2 señas)"
+                    f"(se requieren {validacion.get('minimo_videos_requerido', 40)} videos y 2 señas)"
                 )
             )
 
@@ -725,7 +717,8 @@ def iniciar_entrenamiento_modelo(
             }
 
         background_tasks.add_task(
-            servicio_entrenamiento.entrenar, nombre_modelo, categoria_ids, solicitud.epochs
+            servicio_entrenamiento.entrenar,
+            nombre_modelo, categoria_ids, solicitud.epochs, solicitud.desactivar_otros
         )
 
         return RespuestaAPI(
@@ -735,6 +728,7 @@ def iniciar_entrenamiento_modelo(
                 "nombre_modelo": nombre_modelo,
                 "categoria_ids": categoria_ids,
                 "epochs": solicitud.epochs,
+                "desactivar_otros": solicitud.desactivar_otros,
                 "total_videos": validacion.get("total_videos", 0)
             }
         )
@@ -789,11 +783,17 @@ def toggle_modelo(
             modelo.activo = False
             mensaje = f"Modelo '{modelo.nombre}' desactivado"
         else:
-            bd.query(ModeloIA).update({"activo": False}, synchronize_session=False)
-            bd.flush()
+            if request.exclusivo:
+                bd.query(ModeloIA).filter(ModeloIA.id != modelo.id).update(
+                    {"activo": False}, synchronize_session=False
+                )
+                bd.flush()
+                bd.expire_all()
             modelo.activo = True
             modelo.fecha_activacion = datetime.now()
             mensaje = f"Modelo '{modelo.nombre}' activado"
+            if not request.exclusivo:
+                mensaje += " (sin desactivar los demás)"
 
         bd.commit()
 
@@ -804,7 +804,12 @@ def toggle_modelo(
         except Exception as e:
             logger.warning(f"[TOGGLE] No se pudo limpiar cache: {e}")
 
-        return RespuestaAPI(exito=True, mensaje=mensaje, datos={"activo": modelo.activo})
+        total_activos = bd.query(ModeloIA).filter(ModeloIA.activo == True).count()
+
+        return RespuestaAPI(
+            exito=True, mensaje=mensaje,
+            datos={"activo": modelo.activo, "exclusivo": request.exclusivo, "total_activos": total_activos}
+        )
 
     except HTTPException:
         bd.rollback()
@@ -858,8 +863,12 @@ def activar_modelo(
                 detail=f"El archivo del modelo no existe en disco: {modelo.ruta_archivo}"
             )
 
-        bd.query(ModeloIA).update({"activo": False}, synchronize_session=False)
-        bd.flush()
+        if request.exclusivo:
+            bd.query(ModeloIA).filter(ModeloIA.id != modelo.id).update(
+                {"activo": False}, synchronize_session=False
+            )
+            bd.flush()
+            bd.expire_all()
 
         modelo.activo = True
         modelo.fecha_activacion = datetime.now()
@@ -873,6 +882,8 @@ def activar_modelo(
         except Exception as e:
             logger.warning(f"[ACTIVAR] No se pudo limpiar cache: {e}")
 
+        total_activos = bd.query(ModeloIA).filter(ModeloIA.activo == True).count()
+
         return RespuestaAPI(
             exito=True,
             mensaje=f"Modelo '{modelo.nombre}' activado exitosamente",
@@ -882,6 +893,8 @@ def activar_modelo(
                 "accuracy": modelo.accuracy,
                 "num_clases": modelo.num_clases,
                 "activo": modelo.activo,
+                "exclusivo": request.exclusivo,
+                "total_activos": total_activos,
                 "estado_texto": "Activo" if modelo.activo else "Inactivo"
             }
         )
@@ -902,7 +915,7 @@ def activar_modelo(
 async def subir_datos_entrenamiento(
     archivos: List[UploadFile] = File(...),
     categoria: str = "general",
-    usuario_actual: Usuario = Depends(requiere_permiso("dataset.gestionar"))
+    usuario_actual: Usuario = Depends(requiere_permiso("dataset.videos.gestionar"))
 ):
     if not re.fullmatch(r"[\w\-]{1,50}", categoria):
         raise HTTPException(
@@ -1197,38 +1210,49 @@ def activar_multiples_modelos(
 ):
     try:
         nombres = solicitud.nombres_modelos
-        pesos = solicitud.pesos or [1.0] * len(nombres)
 
-        logger.info(f"[ENSEMBLE] Activando: {nombres} con pesos: {pesos}")
+        logger.info(f"[ACTIVAR-MULTIPLES] Activando: {nombres}")
 
-        if len(nombres) < 2:
-            raise HTTPException(status_code=400, detail="Se requieren al menos 2 modelos para ensemble")
-
-        if len(pesos) != len(nombres):
-            raise HTTPException(status_code=400, detail="Cantidad de pesos debe coincidir con modelos")
+        if len(nombres) < 1:
+            raise HTTPException(status_code=400, detail="Debes indicar al menos un modelo")
 
         modelos = {
             m.nombre: m for m in db.query(ModeloIA).filter(ModeloIA.nombre.in_(nombres)).all()
         }
         no_encontrados = [n for n in nombres if n not in modelos]
 
-        if len(modelos) < 2:
+        if not modelos:
             raise HTTPException(
                 status_code=404,
-                detail=f"Solo se encontraron {len(modelos)} modelos de {len(nombres)}; no se cambió nada"
+                detail=f"No se encontró ningún modelo de {nombres}; no se cambió nada"
             )
 
-        db.query(ModeloIA).update({"activo": False}, synchronize_session=False)
+        sin_archivo = [
+            m.nombre for m in modelos.values()
+            if not m.ruta_archivo or not os.path.exists(m.ruta_archivo)
+        ]
+        if sin_archivo:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Falta el archivo .pth de: {sin_archivo}; no se cambió nada"
+            )
+
+        ids_objetivo = {modelos[n].id for n in nombres if n in modelos}
+
+        db.query(ModeloIA).filter(~ModeloIA.id.in_(ids_objetivo)).update(
+            {"activo": False}, synchronize_session=False
+        )
+        db.flush()
+        db.expire_all()
 
         modelos_activados = []
-        for nombre, peso in zip(nombres, pesos):
+        for nombre in nombres:
             modelo = modelos.get(nombre)
             if not modelo:
                 continue
 
             modelo.activo = True
-            if hasattr(modelo, 'peso_ensemble'):
-                modelo.peso_ensemble = peso
+            modelo.fecha_activacion = datetime.now()
             modelos_activados.append(nombre)
 
         db.commit()
@@ -1237,11 +1261,11 @@ def activar_multiples_modelos(
             from app.servicios.gestor_reconocimiento import limpiar_cache
             limpiar_cache()
         except Exception as e:
-            logger.warning(f"[ENSEMBLE] No se pudo limpiar cache: {e}")
+            logger.warning(f"[ACTIVAR-MULTIPLES] No se pudo limpiar cache: {e}")
 
         return {
             "exito": True,
-            "mensaje": f"Ensemble activado con {len(modelos_activados)} modelos",
+            "mensaje": f"Se activaron {len(modelos_activados)} modelos correctamente",
             "datos": {
                 "modelos_activados": modelos_activados,
                 "modelos_no_encontrados": no_encontrados,
@@ -1254,7 +1278,7 @@ def activar_multiples_modelos(
         raise
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error activando ensemble: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error activando modelos: {str(e)}")
 
 
 @router.post("/modelos/desactivar-todos")
@@ -1284,8 +1308,8 @@ def desactivar_todos_modelos(
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
-@router.get("/modelos/activos/ensemble")
-def obtener_config_ensemble(
+@router.get("/modelos/activos")
+def obtener_modelos_activos(
     usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
     db: Session = Depends(obtener_bd)
 ):
@@ -1295,7 +1319,6 @@ def obtener_config_ensemble(
         config = [
             {
                 "nombre": modelo.nombre,
-                "peso": getattr(modelo, 'peso_ensemble', 1.0),
                 "accuracy": modelo.accuracy or 0.0,
                 "num_clases": modelo.num_clases or 0,
                 "tipo": getattr(modelo, 'tipo_modelo', 'LSTM'),
@@ -1306,7 +1329,7 @@ def obtener_config_ensemble(
 
         return {
             "exito": True,
-            "mensaje": f"Ensemble con {len(modelos)} modelos",
+            "mensaje": f"{len(modelos)} modelos activos",
             "datos": {
                 "total_modelos": len(modelos),
                 "modelos": config
@@ -1348,5 +1371,71 @@ def obtener_videos_modelo(
         "datos": {
             "total": len(videos),
             "videos": videos
+        }
+    }
+
+@router.get("/diagnostico/seleccion-modelos")
+def diagnostico_seleccion_modelos(
+    usuario_actual: Usuario = Depends(requiere_permiso("modelos.gestionar")),
+    db: Session = Depends(obtener_bd)
+):
+    from app.modelos.categoria import Categoria
+    from app.modelos.dataset import CategoriaDataset
+
+    categorias = db.query(Categoria).order_by(Categoria.id).all()
+    dataset_cats = db.query(CategoriaDataset).order_by(CategoriaDataset.id).all()
+    modelos = db.query(ModeloIA).order_by(ModeloIA.id).all()
+
+    modelos_por_id = {m.id: m for m in modelos}
+
+    cat_info = []
+    for c in categorias:
+        modelo = modelos_por_id.get(c.modelo_ia_id) if c.modelo_ia_id else None
+        cat_info.append({
+            "categoria_id": c.id,
+            "nombre": c.nombre,
+            "modelo_ia_id": c.modelo_ia_id,
+            "modelo_nombre": modelo.nombre if modelo else None,
+            "modelo_activo": modelo.activo if modelo else None,
+        })
+
+    ds_info = []
+    for dc in dataset_cats:
+        ds_info.append({
+            "dataset_id": dc.id,
+            "nombre": dc.nombre,
+            "categoria_id": dc.categoria_id,
+        })
+
+    mod_info = []
+    for m in modelos:
+        mod_info.append({
+            "id": m.id,
+            "nombre": m.nombre,
+            "activo": m.activo,
+            "num_clases": m.num_clases,
+            "fecha_entrenamiento": _iso(m.fecha_entrenamiento),
+            "fecha_activacion": _iso(getattr(m, "fecha_activacion", None)),
+        })
+
+    activos = [m for m in modelos if m.activo]
+    mas_reciente = None
+    if activos:
+        mas_reciente = max(
+            activos,
+            key=lambda m: (m.fecha_entrenamiento or datetime.min, m.id)
+        )
+
+    return {
+        "exito": True,
+        "mensaje": "Diagnóstico generado",
+        "datos": {
+            "categorias": cat_info,
+            "dataset_categorias": ds_info,
+            "modelos": mod_info,
+            "fallback_actual": {
+                "modelo_id": mas_reciente.id if mas_reciente else None,
+                "modelo_nombre": mas_reciente.nombre if mas_reciente else None,
+            }
         }
     }

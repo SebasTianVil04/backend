@@ -1,330 +1,345 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, func
 from typing import Optional
 
-from app.modelos.clase import Clase
-from app.modelos.progreso import ProgresoClase
-from app.modelos.examen import ResultadoExamen
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload, selectinload
 
+from ..dependencias.permisos import requiere_permiso
+from ..esquemas.leccion_schemas import LeccionActualizar, LeccionCrear, RespuestaAPI, RespuestaLista
+from ..modelos.categoria import Categoria
+from ..modelos.clase import Clase
+from ..modelos.examen import Examen, ResultadoExamen
+from ..modelos.leccion import Leccion
+from ..modelos.progreso import ProgresoClase
+from ..modelos.usuario import Usuario
 from ..utilidades.base_datos import obtener_bd
 from ..utilidades.seguridad import obtener_usuario_actual
-from ..dependencias.permisos import requiere_permiso
-from ..modelos.leccion import Leccion
-from ..modelos.categoria import Categoria
-from ..modelos.usuario import Usuario
-from ..modelos.examen import Examen
-from ..esquemas.leccion_schemas import LeccionCrear, LeccionActualizar, RespuestaAPI, RespuestaLista
 
 router = APIRouter(prefix="/lecciones", tags=["Lecciones"])
 
+PERMISO_GESTION = "admin.lecciones.gestionar"
+
+CAMPOS_LECCION = (
+    "id", "titulo", "descripcion", "sena", "categoria_id", "categoria_nombre",
+    "orden", "nivel_dificultad", "activa", "bloqueada", "puntos_base",
+    "puntos_perfecto", "leccion_previa_id", "total_clases", "fecha_creacion",
+)
+
+CAMPOS_LECCION_OPCIONALES = (
+    "color_tema", "imagen_miniatura", "requiere_examen_nivel", "numero_examen",
+    "nivel_dificultad_texto", "fecha_actualizacion",
+)
+
+
+def _confirmar(db: Session) -> None:
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _puede_gestionar(usuario: Usuario) -> bool:
+    return bool(usuario.es_admin or usuario.tiene_permiso(PERMISO_GESTION))
+
+
+def _serializar(leccion: Leccion, total_clases: Optional[int] = None) -> dict:
+    datos = {}
+    for campo in CAMPOS_LECCION:
+        if campo == "total_clases" and total_clases is not None:
+            datos[campo] = total_clases
+        else:
+            datos[campo] = getattr(leccion, campo)
+    for campo in CAMPOS_LECCION_OPCIONALES:
+        if hasattr(leccion, campo):
+            datos[campo] = getattr(leccion, campo)
+    return datos
+
+
+def _conteo_clases_activas(db: Session, leccion_ids: list[int]) -> dict[int, int]:
+    if not leccion_ids:
+        return {}
+    filas = (
+        db.query(Clase.leccion_id, func.count(Clase.id))
+        .filter(Clase.leccion_id.in_(leccion_ids), Clase.activa.is_(True))
+        .group_by(Clase.leccion_id)
+        .all()
+    )
+    return {leccion_id: total for leccion_id, total in filas}
+
+
+def _obtener_leccion_o_404(db: Session, leccion_id: int, solo_activas: bool = False) -> Leccion:
+    query = (
+        db.query(Leccion)
+        .options(joinedload(Leccion.categoria_rel))
+        .filter(Leccion.id == leccion_id)
+    )
+    if solo_activas:
+        query = query.filter(Leccion.activa.is_(True))
+
+    leccion = query.first()
+    if not leccion:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lección no encontrada")
+    return leccion
+
+
+def _validar_categoria(db: Session, categoria_id: int) -> None:
+    if not db.query(Categoria.id).filter(Categoria.id == categoria_id).first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Categoría con ID {categoria_id} no existe",
+        )
+
+
+def _validar_leccion_previa(db: Session, previa_id: Optional[int], propio_id: Optional[int] = None) -> None:
+    if previa_id is None:
+        return
+    if propio_id is not None and previa_id == propio_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Una lección no puede ser su propia lección previa",
+        )
+    if not db.query(Leccion.id).filter(Leccion.id == previa_id).first():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Lección previa con ID {previa_id} no existe",
+        )
+
+
+def _examen_disponible(examen: Examen, clases_completadas: int, total_clases: int) -> bool:
+    if examen.requiere_todas_clases:
+        return clases_completadas >= total_clases
+    if examen.clases_requeridas > 0:
+        return clases_completadas >= examen.clases_requeridas
+    return True
+
 
 @router.post("", response_model=RespuestaAPI)
-async def crear_leccion(
+def crear_leccion(
     leccion: LeccionCrear,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(requiere_permiso("admin.lecciones.gestionar"))
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION)),
 ):
-    try:
-        categoria_db = db.query(Categoria).filter(Categoria.id == leccion.categoria_id).first()
-        if not categoria_db:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Categoría con ID {leccion.categoria_id} no existe"
-            )
+    _validar_categoria(db, leccion.categoria_id)
+    _validar_leccion_previa(db, leccion.leccion_previa_id)
 
-        nueva_leccion = Leccion(**leccion.dict())
+    nueva_leccion = Leccion(**leccion.model_dump())
+    db.add(nueva_leccion)
+    _confirmar(db)
+    db.refresh(nueva_leccion)
 
-        db.add(nueva_leccion)
-        db.commit()
-        db.refresh(nueva_leccion)
-
-        return RespuestaAPI(
-            exito=True,
-            mensaje="Lección creada exitosamente",
-            datos={
-                "id": nueva_leccion.id,
-                "titulo": nueva_leccion.titulo,
-                "sena": nueva_leccion.sena,
-                "categoria_id": nueva_leccion.categoria_id,
-                "categoria_nombre": nueva_leccion.categoria_nombre,
-                "nivel_dificultad": nueva_leccion.nivel_dificultad,
-                "orden": nueva_leccion.orden,
-                "puntos_base": nueva_leccion.puntos_base,
-                "puntos_perfecto": nueva_leccion.puntos_perfecto,
-                "activa": nueva_leccion.activa,
-                "bloqueada": nueva_leccion.bloqueada,
-                "total_clases": nueva_leccion.total_clases,
-                "fecha_creacion": nueva_leccion.fecha_creacion
-            }
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al crear lección: {str(e)}"
-        )
+    return RespuestaAPI(exito=True, mensaje="Lección creada exitosamente", datos=_serializar(nueva_leccion))
 
 
 @router.get("", response_model=RespuestaLista)
-async def listar_lecciones(
+def listar_lecciones(
     categoria_id: Optional[int] = None,
     activa: Optional[bool] = None,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
 ):
-    try:
-        query = db.query(Leccion).options(joinedload(Leccion.categoria_rel))
+    query = db.query(Leccion).options(joinedload(Leccion.categoria_rel))
 
-        if activa is not None:
-            query = query.filter(Leccion.activa == activa)
+    if not _puede_gestionar(usuario_actual):
+        activa = True
 
-        if categoria_id:
-            query = query.filter(Leccion.categoria_id == categoria_id)
+    if activa is not None:
+        query = query.filter(Leccion.activa == activa)
 
-        lecciones = query.order_by(Leccion.orden).all()
+    if categoria_id:
+        query = query.filter(Leccion.categoria_id == categoria_id)
 
-        datos = []
-        for leccion in lecciones:
-            datos.append({
-                "id": leccion.id,
-                "titulo": leccion.titulo,
-                "descripcion": leccion.descripcion,
-                "sena": leccion.sena,
-                "categoria_id": leccion.categoria_id,
-                "categoria_nombre": leccion.categoria_nombre,
-                "orden": leccion.orden,
-                "nivel_dificultad": leccion.nivel_dificultad,
-                "activa": leccion.activa,
-                "bloqueada": leccion.bloqueada,
-                "puntos_base": leccion.puntos_base,
-                "puntos_perfecto": leccion.puntos_perfecto,
-                "total_clases": leccion.total_clases,
-                "leccion_previa_id": leccion.leccion_previa_id,
-                "fecha_creacion": leccion.fecha_creacion
-            })
+    lecciones = query.order_by(Leccion.orden).all()
+    conteos = _conteo_clases_activas(db, [leccion.id for leccion in lecciones])
+    datos = [_serializar(leccion, conteos.get(leccion.id, 0)) for leccion in lecciones]
 
-        return RespuestaLista(
-            exito=True,
-            mensaje=f"Se encontraron {len(datos)} lecciones",
-            datos=datos,
-            total=len(datos),
-            pagina=1,
-            por_pagina=len(datos)
-        )
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    return RespuestaLista(
+        exito=True,
+        mensaje=f"Se encontraron {len(datos)} lecciones",
+        datos=datos,
+        total=len(datos),
+        pagina=1,
+        por_pagina=len(datos),
+    )
 
 
 @router.get("/{leccion_id}", response_model=RespuestaAPI)
-async def obtener_leccion(
+def obtener_leccion(
     leccion_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
 ):
-    try:
-        leccion = db.query(Leccion).options(joinedload(Leccion.categoria_rel)).filter(Leccion.id == leccion_id).first()
-        if not leccion:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lección no encontrada")
+    leccion = _obtener_leccion_o_404(db, leccion_id, solo_activas=not _puede_gestionar(usuario_actual))
+    total = _conteo_clases_activas(db, [leccion.id]).get(leccion.id, 0)
+    return RespuestaAPI(exito=True, mensaje="Lección obtenida", datos=_serializar(leccion, total))
 
-        return RespuestaAPI(
-            exito=True,
-            mensaje="Lección obtenida",
-            datos={
-                "id": leccion.id,
-                "titulo": leccion.titulo,
-                "descripcion": leccion.descripcion,
-                "sena": leccion.sena,
-                "categoria_id": leccion.categoria_id,
-                "categoria_nombre": leccion.categoria_nombre,
-                "orden": leccion.orden,
-                "nivel_dificultad": leccion.nivel_dificultad,
-                "activa": leccion.activa,
-                "bloqueada": leccion.bloqueada,
-                "puntos_base": leccion.puntos_base,
-                "puntos_perfecto": leccion.puntos_perfecto,
-                "leccion_previa_id": leccion.leccion_previa_id,
-                "total_clases": leccion.total_clases,
-                "fecha_creacion": leccion.fecha_creacion
-            }
+
+@router.get("/{leccion_id}/progreso-clases", response_model=RespuestaAPI)
+def obtener_progreso_clases_leccion(
+    leccion_id: int,
+    db: Session = Depends(obtener_bd),
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+):
+    _obtener_leccion_o_404(db, leccion_id, solo_activas=not _puede_gestionar(usuario_actual))
+
+    ids_clases = [
+        fila.id
+        for fila in (
+            db.query(Clase.id)
+            .filter(Clase.leccion_id == leccion_id, Clase.activa.is_(True))
+            .order_by(Clase.orden)
+            .all()
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    ]
+
+    completadas = set()
+    if ids_clases:
+        completadas = {
+            fila.clase_id
+            for fila in (
+                db.query(ProgresoClase.clase_id)
+                .filter(
+                    ProgresoClase.usuario_id == usuario_actual.id,
+                    ProgresoClase.completada.is_(True),
+                    ProgresoClase.clase_id.in_(ids_clases),
+                )
+                .all()
+            )
+        }
+
+    clases = [{"clase_id": clase_id, "completada": clase_id in completadas} for clase_id in ids_clases]
+
+    return RespuestaAPI(
+        exito=True,
+        mensaje="Progreso de clases obtenido",
+        datos={
+            "leccion_id": leccion_id,
+            "total_clases": len(ids_clases),
+            "clases_completadas": len(completadas),
+            "clases": clases,
+        },
+    )
 
 
 @router.patch("/{leccion_id}", response_model=RespuestaAPI)
-async def actualizar_leccion(
+def actualizar_leccion(
     leccion_id: int,
     datos: LeccionActualizar,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(requiere_permiso("admin.lecciones.gestionar"))
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION)),
 ):
-    try:
-        leccion = db.query(Leccion).filter(Leccion.id == leccion_id).first()
-        if not leccion:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lección no encontrada")
+    leccion = _obtener_leccion_o_404(db, leccion_id)
+    cambios = datos.model_dump(exclude_unset=True)
 
-        datos_actualizacion = datos.dict(exclude_unset=True)
+    if cambios.get("categoria_id") is not None:
+        _validar_categoria(db, cambios["categoria_id"])
 
-        if "categoria_id" in datos_actualizacion:
-            categoria_db = db.query(Categoria).filter(
-                Categoria.id == datos_actualizacion["categoria_id"]
-            ).first()
-            if not categoria_db:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Categoría con ID {datos_actualizacion['categoria_id']} no existe"
-                )
+    if "leccion_previa_id" in cambios:
+        _validar_leccion_previa(db, cambios["leccion_previa_id"], propio_id=leccion_id)
 
-        for campo, valor in datos_actualizacion.items():
-            setattr(leccion, campo, valor)
+    for campo, valor in cambios.items():
+        setattr(leccion, campo, valor)
 
-        db.commit()
-        db.refresh(leccion)
+    _confirmar(db)
+    db.refresh(leccion)
 
-        return RespuestaAPI(
-            exito=True,
-            mensaje="Lección actualizada exitosamente",
-            datos={
-                "id": leccion.id,
-                "titulo": leccion.titulo,
-                "sena": leccion.sena,
-                "categoria_id": leccion.categoria_id,
-                "categoria_nombre": leccion.categoria_nombre,
-                "nivel_dificultad": leccion.nivel_dificultad,
-                "orden": leccion.orden,
-                "puntos_base": leccion.puntos_base,
-                "puntos_perfecto": leccion.puntos_perfecto,
-                "activa": leccion.activa,
-                "bloqueada": leccion.bloqueada,
-                "total_clases": leccion.total_clases
-            }
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al actualizar: {str(e)}"
-        )
+    total = _conteo_clases_activas(db, [leccion.id]).get(leccion.id, 0)
+    return RespuestaAPI(exito=True, mensaje="Lección actualizada exitosamente", datos=_serializar(leccion, total))
 
 
 @router.delete("/{leccion_id}", response_model=RespuestaAPI)
-async def eliminar_leccion(
+def eliminar_leccion(
     leccion_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(requiere_permiso("admin.lecciones.gestionar"))
+    usuario_actual: Usuario = Depends(requiere_permiso(PERMISO_GESTION)),
 ):
-    try:
-        leccion = db.query(Leccion).filter(Leccion.id == leccion_id).first()
-        if not leccion:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Lección no encontrada")
+    leccion = _obtener_leccion_o_404(db, leccion_id)
 
-        db.delete(leccion)
-        db.commit()
+    db.delete(leccion)
+    _confirmar(db)
 
-        return RespuestaAPI(
-            exito=True,
-            mensaje="Lección eliminada exitosamente",
-            datos=None
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    return RespuestaAPI(exito=True, mensaje="Lección eliminada exitosamente", datos=None)
 
 
 @router.get("/{leccion_id}/examenes", response_model=RespuestaLista)
-async def obtener_examenes_leccion(
+def obtener_examenes_leccion(
     leccion_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+    usuario_actual: Usuario = Depends(obtener_usuario_actual),
 ):
-    try:
-        leccion = db.query(Leccion).filter(
-            Leccion.id == leccion_id,
-            Leccion.activa == True
-        ).first()
+    leccion = _obtener_leccion_o_404(db, leccion_id, solo_activas=True)
 
-        if not leccion:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Lección no encontrada"
-            )
+    modelo_pregunta = Examen.preguntas.property.mapper.class_
 
-        examenes = db.query(Examen).filter(
-            Examen.leccion_id == leccion_id,
-            Examen.activo == True
-        ).order_by(Examen.orden).all()
+    examenes = (
+        db.query(Examen)
+        .options(selectinload(Examen.preguntas).load_only(modelo_pregunta.id).lazyload("*"))
+        .filter(Examen.leccion_id == leccion_id, Examen.activo.is_(True))
+        .order_by(Examen.orden)
+        .all()
+    )
 
-        progreso_clases = db.query(ProgresoClase).join(Clase).filter(
+    clases_completadas = (
+        db.query(func.count())
+        .select_from(ProgresoClase)
+        .join(Clase)
+        .filter(
             ProgresoClase.usuario_id == usuario_actual.id,
             Clase.leccion_id == leccion_id,
-            ProgresoClase.completada == True
-        ).count()
-
-        total_clases = db.query(Clase).filter(
-            Clase.leccion_id == leccion_id,
-            Clase.activa == True
-        ).count()
-
-        examenes_data = []
-        for examen in examenes:
-            disponible = True
-
-            if examen.requiere_todas_clases:
-                disponible = progreso_clases >= total_clases
-            elif examen.clases_requeridas > 0:
-                disponible = progreso_clases >= examen.clases_requeridas
-
-            mejor_resultado = db.query(ResultadoExamen).filter(
-                and_(
-                    ResultadoExamen.usuario_id == usuario_actual.id,
-                    ResultadoExamen.examen_id == examen.id
-                )
-            ).order_by(ResultadoExamen.porcentaje.desc()).first()
-
-            examen_info = {
-                "id": examen.id,
-                "titulo": examen.titulo,
-                "descripcion": examen.descripcion,
-                "tipo": examen.tipo,
-                "nivel": examen.nivel,
-                "leccion_id": examen.leccion_id,
-                "orden": examen.orden,
-                "clases_requeridas": examen.clases_requeridas,
-                "requiere_todas_clases": examen.requiere_todas_clases,
-                "tiempo_limite": examen.tiempo_limite,
-                "puntuacion_minima": examen.puntuacion_minima,
-                "activo": examen.activo,
-                "total_preguntas": len(examen.preguntas) if hasattr(examen, 'preguntas') else 0,
-                "completado": mejor_resultado is not None,
-                "mejor_calificacion": mejor_resultado.porcentaje if mejor_resultado else 0,
-                "aprobado": mejor_resultado.aprobado if mejor_resultado else False,
-                "disponible": disponible,
-                "fecha_creacion": examen.fecha_creacion.isoformat() if examen.fecha_creacion else None
-            }
-            examenes_data.append(examen_info)
-
-        return RespuestaLista(
-            exito=True,
-            mensaje=f"Exámenes de la lección '{leccion.titulo}'",
-            datos=examenes_data,
-            total=len(examenes_data),
-            pagina=1,
-            por_pagina=len(examenes_data)
+            ProgresoClase.completada.is_(True),
         )
+        .scalar()
+    ) or 0
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error al obtener exámenes de lección: {str(e)}"
+    total_clases = (
+        db.query(func.count(Clase.id))
+        .filter(Clase.leccion_id == leccion_id, Clase.activa.is_(True))
+        .scalar()
+    ) or 0
+
+    mejores = {}
+    if examenes:
+        resultados = (
+            db.query(ResultadoExamen)
+            .filter(
+                ResultadoExamen.usuario_id == usuario_actual.id,
+                ResultadoExamen.examen_id.in_([examen.id for examen in examenes]),
+            )
+            .order_by(ResultadoExamen.porcentaje.desc())
+            .all()
         )
+        for resultado in resultados:
+            mejores.setdefault(resultado.examen_id, resultado)
+
+    datos = []
+    for examen in examenes:
+        mejor = mejores.get(examen.id)
+        datos.append({
+            "id": examen.id,
+            "titulo": examen.titulo,
+            "descripcion": examen.descripcion,
+            "tipo": examen.tipo,
+            "nivel": examen.nivel,
+            "leccion_id": examen.leccion_id,
+            "orden": examen.orden,
+            "clases_requeridas": examen.clases_requeridas,
+            "requiere_todas_clases": examen.requiere_todas_clases,
+            "tiempo_limite": examen.tiempo_limite,
+            "puntuacion_minima": examen.puntuacion_minima,
+            "activo": examen.activo,
+            "total_preguntas": len(examen.preguntas),
+            "completado": mejor is not None,
+            "mejor_calificacion": mejor.porcentaje if mejor else 0,
+            "aprobado": mejor.aprobado if mejor else False,
+            "disponible": _examen_disponible(examen, clases_completadas, total_clases),
+            "fecha_creacion": examen.fecha_creacion.isoformat() if examen.fecha_creacion else None,
+        })
+
+    return RespuestaLista(
+        exito=True,
+        mensaje=f"Exámenes de la lección '{leccion.titulo}'",
+        datos=datos,
+        total=len(datos),
+        pagina=1,
+        por_pagina=len(datos),
+    )

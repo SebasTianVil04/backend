@@ -38,6 +38,8 @@ def crear_tablas():
         print("Importando modelos para crear tablas...")
 
         from app.modelos.usuario import Usuario
+        from app.modelos.rol import Rol
+        from app.modelos.sesion_usuario import SesionUsuario
         from app.modelos.categoria import Categoria
         from app.modelos.leccion import Leccion
         from app.modelos.clase import Clase

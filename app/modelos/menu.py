@@ -13,7 +13,7 @@ class MenuItem(Base):
     permiso_codigo = Column(String(100), nullable=True)
     orden = Column(Integer, default=0)
     activo = Column(Boolean, default=True)
-    padre_id = Column(Integer, ForeignKey("menu_items.id"), nullable=True)
+    padre_id = Column(Integer, ForeignKey("menu_items.id"), nullable=True, index=True)
 
     hijos = relationship(
         "MenuItem",

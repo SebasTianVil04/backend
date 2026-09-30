@@ -1,3 +1,4 @@
+from collections import defaultdict
 from typing import List, Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -19,7 +20,7 @@ class MenuItemPublico(BaseModel):
     hijos: Optional[List["MenuItemPublico"]] = None
 
 
-MenuItemPublico.update_forward_refs()
+MenuItemPublico.model_rebuild()
 
 
 def _es_ruta_admin(ruta: Optional[str]) -> bool:
@@ -28,20 +29,29 @@ def _es_ruta_admin(ruta: Optional[str]) -> bool:
     return ruta.startswith("/admin")
 
 
-def _filtrar(items, permisos, es_admin):
+def _cargar_hijos_de(db: Session) -> dict:
+    items = (
+        db.query(MenuItem)
+        .filter(MenuItem.activo == True)
+        .order_by(MenuItem.orden)
+        .all()
+    )
+    hijos_de = defaultdict(list)
+    for item in items:
+        hijos_de[item.padre_id].append(item)
+    return hijos_de
+
+
+def _filtrar(items, hijos_de, permisos, es_admin):
     resultado = []
 
     for item in items:
-        if not item.activo:
-            continue
+        hijos_item = hijos_de.get(item.id, [])
 
-        tiene_hijos = bool(item.hijos)
-
-        if tiene_hijos:
-            hijos_filtrados = _filtrar(item.hijos, permisos, es_admin)
+        if hijos_item:
+            hijos_filtrados = _filtrar(hijos_item, hijos_de, permisos, es_admin)
             if not hijos_filtrados:
                 continue
-
             resultado.append(MenuItemPublico(
                 label=item.label,
                 icon=item.icon,
@@ -50,10 +60,8 @@ def _filtrar(items, permisos, es_admin):
             ))
             continue
 
-        es_ruta_admin_item = _es_ruta_admin(item.ruta)
-
         if es_admin:
-            if item.ruta and not es_ruta_admin_item:
+            if item.ruta and not _es_ruta_admin(item.ruta):
                 continue
         else:
             if item.permiso_codigo and item.permiso_codigo not in permisos:
@@ -74,11 +82,7 @@ def obtener_menu(
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     db: Session = Depends(obtener_bd),
 ):
-    raices = (
-        db.query(MenuItem)
-        .filter(MenuItem.padre_id.is_(None), MenuItem.activo == True)
-        .order_by(MenuItem.orden)
-        .all()
-    )
+    hijos_de = _cargar_hijos_de(db)
+    raices = hijos_de.get(None, [])
     permisos = set(usuario_actual.permisos or [])
-    return _filtrar(raices, permisos, bool(usuario_actual.es_admin))
+    return _filtrar(raices, hijos_de, permisos, bool(usuario_actual.es_admin))

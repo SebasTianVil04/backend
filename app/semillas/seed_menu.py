@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -12,7 +12,7 @@ ITEMS: List[Dict] = [
     {"label": "Inicio", "icon": "🏠", "ruta": "/inicio", "permiso": None, "orden": 1},
     {"label": "Lecciones", "icon": "📚", "ruta": "/lecciones", "permiso": "lecciones.ver", "orden": 2},
     {"label": "Autoevaluación", "icon": "📝", "ruta": "/examenes", "permiso": "examenes.ver", "orden": 3},
-    {"label": "Mi Progreso", "icon": "📊", "ruta": "/progreso", "permiso": "usuarios.ver_progreso", "orden": 4},
+    {"label": "Mi Progreso", "icon": "📊", "ruta": "/progreso", "permiso": "progreso.ver", "orden": 4},
 
     {"label": "Panel", "icon": "📊", "ruta": "/admin/panel", "permiso": "admin.dashboard.ver", "orden": 10},
     {
@@ -21,7 +21,7 @@ ITEMS: List[Dict] = [
             {"label": "Lecciones", "icon": "📖", "ruta": "/admin/lecciones", "permiso": "admin.lecciones.gestionar", "orden": 21},
             {"label": "Autoevaluación", "icon": "📝", "ruta": "/admin/examenes", "permiso": "admin.examenes.gestionar", "orden": 22},
             {"label": "Categorías", "icon": "🖼️", "ruta": "/admin/categorias", "permiso": "admin.categorias.gestionar", "orden": 23},
-            {"label": "Videos", "icon": "🎬", "ruta": "/admin/imagenes", "permiso": "dataset.gestionar", "orden": 24},
+            {"label": "Videos", "icon": "🎬", "ruta": "/admin/imagenes", "permiso": "dataset.videos.gestionar", "orden": 24},
         ],
     },
 
@@ -41,11 +41,7 @@ ITEMS: List[Dict] = [
 ]
 
 
-def _clave(data: Dict, padre_id: Optional[int]) -> tuple:
-    return (data["label"], data.get("ruta"), padre_id)
-
-
-def _sincronizar(db: Session, items: List[Dict], padre_id: Optional[int] = None) -> int:
+def _sincronizar(db: Session, items: List[Dict], padre_id: Optional[int] = None) -> Tuple[int, int]:
     creados = 0
     actualizados = 0
 
@@ -55,8 +51,7 @@ def _sincronizar(db: Session, items: List[Dict], padre_id: Optional[int] = None)
     }
 
     for data in items:
-        clave = _clave(data, padre_id)
-        item = existentes.get(clave)
+        item = existentes.get((data["label"], data.get("ruta"), padre_id))
 
         if item is None:
             item = MenuItem(
@@ -77,7 +72,7 @@ def _sincronizar(db: Session, items: List[Dict], padre_id: Optional[int] = None)
             if item.permiso_codigo != nuevo_permiso:
                 logger.info(
                     "Ítem de menú actualizado: %s (permiso: %s -> %s)",
-                    data["label"], item.permiso_codigo, nuevo_permiso
+                    data["label"], item.permiso_codigo, nuevo_permiso,
                 )
                 item.permiso_codigo = nuevo_permiso
                 actualizados += 1
@@ -96,7 +91,7 @@ def seed_menu(db: Session) -> None:
         total = db.query(MenuItem).count()
         logger.info(
             "Seed menú completado: %d ítems nuevos, %d actualizados, %d en total",
-            creados, actualizados, total
+            creados, actualizados, total,
         )
 
     except Exception as e:

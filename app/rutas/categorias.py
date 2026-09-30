@@ -1,16 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from typing import Any, Dict, Iterable, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
-from typing import List, Dict, Optional
+
 from app.modelos.dataset import CategoriaDataset, VideoDataset
 from ..utilidades.base_datos import obtener_bd
-from ..utilidades.seguridad import obtener_usuario_actual
 from ..dependencias.permisos import requiere_permiso
 from ..modelos.usuario import Usuario
 from ..modelos.categoria import Categoria
+from ..modelos.entrenamiento import ModeloIA
+from ..modelos.leccion import Leccion
 from ..modelos.tipo_categoria import TipoCategoria
 from ..esquemas.categoria import CategoriaCrear, CategoriaActualizar
 from ..esquemas.respuestas import RespuestaAPI, RespuestaLista
-from pydantic import BaseModel
 
 
 router = APIRouter(prefix="/categorias", tags=["Categorías"])
@@ -25,53 +29,148 @@ class AsignacionesLoteRequest(BaseModel):
     asignaciones: List[AsignacionModeloLote]
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _dump(modelo: BaseModel, **kwargs) -> Dict[str, Any]:
+    """Compatible con Pydantic v1 (.dict) y v2 (.model_dump)."""
+    if hasattr(modelo, "model_dump"):
+        return modelo.model_dump(**kwargs)
+    return modelo.dict(**kwargs)
+
+
+def _opcion_modelo():
+    """Carga solo las columnas del modelo de IA que se devuelven (evita traer clases_json, etc.)."""
+    return joinedload(Categoria.modelo_ia).load_only(
+        ModeloIA.nombre,
+        ModeloIA.activo,
+        ModeloIA.accuracy,
+        ModeloIA.num_clases,
+        ModeloIA.tipo_modelo,
+    )
+
+
+def _conteo_lecciones(db: Session, ids: Optional[Iterable[int]] = None) -> Dict[int, int]:
+    """
+    Total de lecciones por categoría con un único GROUP BY.
+    Reemplaza a joinedload(Categoria.lecciones) + len(categoria.lecciones), que traía
+    todas las lecciones (multiplicando las filas del JOIN) solo para contarlas.
+    """
+    consulta = (
+        db.query(Categoria.id, func.count(Leccion.id))
+        .outerjoin(Categoria.lecciones)
+        .group_by(Categoria.id)
+    )
+
+    if ids is not None:
+        ids = list(ids)
+        if not ids:
+            return {}
+        consulta = consulta.filter(Categoria.id.in_(ids))
+
+    return {categoria_id: int(total) for categoria_id, total in consulta.all()}
+
+
+def _mapa_dataset_ids(db: Session, ids: Iterable[int]) -> Dict[int, int]:
+    """Categoria.id -> CategoriaDataset.id (es el id que usan los videos del dataset)."""
+    ids = list(ids)
+    if not ids:
+        return {}
+
+    filas = (
+        db.query(CategoriaDataset.categoria_id, func.min(CategoriaDataset.id))
+        .filter(CategoriaDataset.categoria_id.in_(ids))
+        .group_by(CategoriaDataset.categoria_id)
+        .all()
+    )
+    return {categoria_id: dataset_id for categoria_id, dataset_id in filas}
+
+
+def _base(c: Categoria, total_lecciones: int) -> Dict[str, Any]:
+    return {
+        "id": c.id,
+        "nombre": c.nombre,
+        "tipo_id": c.tipo_id,
+        "descripcion": c.descripcion,
+        "icono": c.icono,
+        "color": c.color,
+        "orden": c.orden,
+        "nivel_requerido": c.nivel_requerido,
+        "activa": c.activa,
+        "total_lecciones": total_lecciones,
+    }
+
+
+def _con_tipo(datos: Dict[str, Any], c: Categoria) -> Dict[str, Any]:
+    datos["tipo_valor"] = c.tipo_rel.valor if c.tipo_rel else None
+    datos["tipo_etiqueta"] = c.tipo_rel.etiqueta if c.tipo_rel else None
+    return datos
+
+
+def _con_fechas(datos: Dict[str, Any], c: Categoria) -> Dict[str, Any]:
+    datos["fecha_creacion"] = c.fecha_creacion
+    datos["fecha_actualizacion"] = c.fecha_actualizacion
+    return datos
+
+
+def _detalle(c: Categoria, total_lecciones: int) -> Dict[str, Any]:
+    return _con_fechas(_con_tipo(_base(c, total_lecciones), c), c)
+
+
+def _total_lecciones(db: Session, categoria_id: int) -> int:
+    return _conteo_lecciones(db, [categoria_id]).get(categoria_id, 0)
+
+
+def _obtener_o_404(db: Session, categoria_id: int) -> Categoria:
+    categoria = (
+        db.query(Categoria)
+        .options(joinedload(Categoria.tipo_rel))
+        .filter(Categoria.id == categoria_id)
+        .first()
+    )
+    if not categoria:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Categoría con ID {categoria_id} no encontrada",
+        )
+    return categoria
+
+
+# ---------------------------------------------------------------------------
+# Listados
+# ---------------------------------------------------------------------------
+
 @router.get("/con-modelos", response_model=RespuestaLista)
 def listar_categorias_con_modelos_completo(
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+    usuario_actual: Usuario = Depends(requiere_permiso("categorias.ver"))
 ):
     try:
-        from app.modelos.entrenamiento import ModeloIA
+        categorias = (
+            db.query(Categoria)
+            .options(_opcion_modelo())
+            .filter(Categoria.activa == True)
+            .order_by(Categoria.orden)
+            .all()
+        )
 
-        categorias = db.query(Categoria).options(
-            joinedload(Categoria.modelo_ia)
-        ).filter(Categoria.activa == True).order_by(Categoria.orden).all()
+        lecciones = _conteo_lecciones(db, [c.id for c in categorias])
 
         categorias_data = []
         for categoria in categorias:
-            categoria_dict = {
-                "id": categoria.id,
-                "nombre": categoria.nombre,
-                "tipo_id": categoria.tipo_id,
-                "descripcion": categoria.descripcion,
-                "icono": categoria.icono,
-                "color": categoria.color,
-                "orden": categoria.orden,
-                "nivel_requerido": categoria.nivel_requerido,
-                "activa": categoria.activa,
-                "total_lecciones": categoria.total_lecciones,
+            datos = _base(categoria, lecciones.get(categoria.id, 0))
+            modelo = categoria.modelo_ia
+            datos.update({
                 "modelo_ia_id": categoria.modelo_ia_id,
-                "tiene_modelo": categoria.modelo_ia_id is not None
-            }
-
-            if categoria.modelo_ia:
-                categoria_dict.update({
-                    "modelo_nombre": categoria.modelo_ia.nombre,
-                    "modelo_activo": categoria.modelo_ia.activo,
-                    "modelo_accuracy": categoria.modelo_ia.accuracy,
-                    "modelo_num_clases": categoria.modelo_ia.num_clases,
-                    "modelo_tipo": categoria.modelo_ia.tipo_modelo
-                })
-            else:
-                categoria_dict.update({
-                    "modelo_nombre": None,
-                    "modelo_activo": False,
-                    "modelo_accuracy": None,
-                    "modelo_num_clases": None,
-                    "modelo_tipo": None
-                })
-
-            categorias_data.append(categoria_dict)
+                "tiene_modelo": categoria.modelo_ia_id is not None,
+                "modelo_nombre": modelo.nombre if modelo else None,
+                "modelo_activo": modelo.activo if modelo else False,
+                "modelo_accuracy": modelo.accuracy if modelo else None,
+                "modelo_num_clases": modelo.num_clases if modelo else None,
+                "modelo_tipo": modelo.tipo_modelo if modelo else None,
+            })
+            categorias_data.append(datos)
 
         return RespuestaLista(
             exito=True,
@@ -92,15 +191,14 @@ def listar_categorias_con_modelos_completo(
 @router.get("", response_model=RespuestaLista)
 def listar_categorias(
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual),
+    usuario_actual: Usuario = Depends(requiere_permiso("categorias.ver")),
     activas_solo: bool = Query(True),
     tipo_id: Optional[int] = Query(None)
 ):
     try:
         query = db.query(Categoria).options(
-            joinedload(Categoria.lecciones),
             joinedload(Categoria.tipo_rel),
-            joinedload(Categoria.modelo_ia)
+            _opcion_modelo(),
         )
 
         if activas_solo:
@@ -111,29 +209,24 @@ def listar_categorias(
 
         categorias = query.order_by(Categoria.orden).all()
 
+        ids = [c.id for c in categorias]
+        lecciones = _conteo_lecciones(db, ids)
+        datasets = _mapa_dataset_ids(db, ids)
+
         categorias_data = []
         for categoria in categorias:
-            categorias_data.append({
-                "id": categoria.id,
-                "nombre": categoria.nombre,
-                "tipo_id": categoria.tipo_id,
-                "tipo_valor": categoria.tipo_rel.valor if categoria.tipo_rel else None,
-                "tipo_etiqueta": categoria.tipo_rel.etiqueta if categoria.tipo_rel else None,
-                "descripcion": categoria.descripcion,
-                "icono": categoria.icono,
-                "color": categoria.color,
-                "orden": categoria.orden,
-                "nivel_requerido": categoria.nivel_requerido,
-                "activa": categoria.activa,
-                "total_lecciones": categoria.total_lecciones,
+            datos = _con_tipo(_base(categoria, lecciones.get(categoria.id, 0)), categoria)
+            modelo = categoria.modelo_ia
+            datos.update({
                 "modelo_ia_id": categoria.modelo_ia_id,
-                "modelo_nombre": categoria.modelo_ia.nombre if categoria.modelo_ia else None,
-                "modelo_activo": categoria.modelo_ia.activo if categoria.modelo_ia else False,
-                "modelo_accuracy": categoria.modelo_ia.accuracy if categoria.modelo_ia else None,
+                "modelo_nombre": modelo.nombre if modelo else None,
+                "modelo_activo": modelo.activo if modelo else False,
+                "modelo_accuracy": modelo.accuracy if modelo else None,
                 "tiene_modelo": categoria.tiene_modelo_asignado,
-                "fecha_creacion": categoria.fecha_creacion,
-                "fecha_actualizacion": categoria.fecha_actualizacion
+                # id de CategoriaDataset: es el que esperan los endpoints de captura/dataset
+                "dataset_id": datasets.get(categoria.id),
             })
+            categorias_data.append(_con_fechas(datos, categoria))
 
         return RespuestaLista(
             exito=True,
@@ -155,41 +248,15 @@ def listar_categorias(
 def obtener_categoria(
     categoria_id: int,
     db: Session = Depends(obtener_bd),
-    usuario_actual: Usuario = Depends(obtener_usuario_actual)
+    usuario_actual: Usuario = Depends(requiere_permiso("categorias.ver"))
 ):
     try:
-        categoria = db.query(Categoria).options(
-            joinedload(Categoria.lecciones),
-            joinedload(Categoria.tipo_rel)
-        ).filter(Categoria.id == categoria_id).first()
-
-        if not categoria:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Categoría con ID {categoria_id} no encontrada"
-            )
-
-        categoria_data = {
-            "id": categoria.id,
-            "nombre": categoria.nombre,
-            "tipo_id": categoria.tipo_id,
-            "tipo_valor": categoria.tipo_rel.valor if categoria.tipo_rel else None,
-            "tipo_etiqueta": categoria.tipo_rel.etiqueta if categoria.tipo_rel else None,
-            "descripcion": categoria.descripcion,
-            "icono": categoria.icono,
-            "color": categoria.color,
-            "orden": categoria.orden,
-            "nivel_requerido": categoria.nivel_requerido,
-            "activa": categoria.activa,
-            "total_lecciones": categoria.total_lecciones,
-            "fecha_creacion": categoria.fecha_creacion,
-            "fecha_actualizacion": categoria.fecha_actualizacion
-        }
+        categoria = _obtener_o_404(db, categoria_id)
 
         return RespuestaAPI(
             exito=True,
             mensaje="Categoría obtenida exitosamente",
-            datos=categoria_data
+            datos=_detalle(categoria, _total_lecciones(db, categoria_id))
         )
 
     except HTTPException:
@@ -200,6 +267,10 @@ def obtener_categoria(
             detail=f"Error al obtener categoría: {str(e)}"
         )
 
+
+# ---------------------------------------------------------------------------
+# Escritura
+# ---------------------------------------------------------------------------
 
 @router.post("", response_model=RespuestaAPI)
 def crear_categoria(
@@ -218,7 +289,7 @@ def crear_categoria(
                 detail=f"Tipo de categoría {categoria.tipo_id} no existe"
             )
 
-        existente = db.query(Categoria).filter(
+        existente = db.query(Categoria.id).filter(
             Categoria.nombre == categoria.nombre
         ).first()
 
@@ -274,6 +345,7 @@ def crear_categoria(
         )
 
     except HTTPException:
+        db.rollback()
         raise
     except Exception as e:
         db.rollback()
@@ -291,19 +363,10 @@ def actualizar_categoria(
     usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar"))
 ):
     try:
-        categoria = db.query(Categoria).options(
-            joinedload(Categoria.lecciones),
-            joinedload(Categoria.tipo_rel)
-        ).filter(Categoria.id == categoria_id).first()
-
-        if not categoria:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Categoría con ID {categoria_id} no encontrada"
-            )
+        categoria = _obtener_o_404(db, categoria_id)
 
         if categoria_actualizar.nombre and categoria_actualizar.nombre != categoria.nombre:
-            existe = db.query(Categoria).filter(
+            existe = db.query(Categoria.id).filter(
                 Categoria.nombre == categoria_actualizar.nombre,
                 Categoria.id != categoria_id
             ).first()
@@ -330,8 +393,7 @@ def actualizar_categoria(
                     detail=f"El tipo '{tipo.etiqueta}' está inactivo"
                 )
 
-        datos_actualizacion = categoria_actualizar.dict(exclude_unset=True)
-        for campo, valor in datos_actualizacion.items():
+        for campo, valor in _dump(categoria_actualizar, exclude_unset=True).items():
             setattr(categoria, campo, valor)
 
         categoria_dataset = db.query(CategoriaDataset).filter(
@@ -349,33 +411,15 @@ def actualizar_categoria(
                 categoria_dataset.orden = categoria_actualizar.orden
 
         db.commit()
-        db.refresh(categoria)
-        db.refresh(categoria, ["tipo_rel"])
-
-        categoria_data = {
-            "id": categoria.id,
-            "nombre": categoria.nombre,
-            "tipo_id": categoria.tipo_id,
-            "tipo_valor": categoria.tipo_rel.valor if categoria.tipo_rel else None,
-            "tipo_etiqueta": categoria.tipo_rel.etiqueta if categoria.tipo_rel else None,
-            "descripcion": categoria.descripcion,
-            "icono": categoria.icono,
-            "color": categoria.color,
-            "orden": categoria.orden,
-            "nivel_requerido": categoria.nivel_requerido,
-            "activa": categoria.activa,
-            "total_lecciones": categoria.total_lecciones,
-            "fecha_creacion": categoria.fecha_creacion,
-            "fecha_actualizacion": categoria.fecha_actualizacion
-        }
 
         return RespuestaAPI(
             exito=True,
             mensaje=f"Categoría '{categoria.nombre}' actualizada exitosamente",
-            datos=categoria_data
+            datos=_detalle(categoria, _total_lecciones(db, categoria_id))
         )
 
     except HTTPException:
+        db.rollback()
         raise
     except Exception as e:
         db.rollback()
@@ -393,18 +437,9 @@ def eliminar_categoria(
     forzar: bool = False
 ):
     try:
-        categoria = db.query(Categoria).options(
-            joinedload(Categoria.lecciones),
-            joinedload(Categoria.tipo_rel)
-        ).filter(Categoria.id == categoria_id).first()
+        categoria = _obtener_o_404(db, categoria_id)
 
-        if not categoria:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Categoría con ID {categoria_id} no encontrada"
-            )
-
-        total_lecciones = len(categoria.lecciones)
+        total_lecciones = _total_lecciones(db, categoria_id)
 
         categoria_dataset = db.query(CategoriaDataset).filter(
             CategoriaDataset.categoria_id == categoria_id
@@ -412,9 +447,9 @@ def eliminar_categoria(
 
         total_videos = 0
         if categoria_dataset:
-            total_videos = db.query(VideoDataset).filter(
+            total_videos = db.query(func.count(VideoDataset.id)).filter(
                 VideoDataset.categoria_id == categoria_dataset.id
-            ).count()
+            ).scalar() or 0
 
         tiene_dependencias = total_lecciones > 0 or total_videos > 0
 
@@ -449,6 +484,7 @@ def eliminar_categoria(
         )
 
     except HTTPException:
+        db.rollback()
         raise
     except Exception as e:
         db.rollback()
@@ -465,16 +501,7 @@ def cambiar_estado_categoria(
     usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar"))
 ):
     try:
-        categoria = db.query(Categoria).options(
-            joinedload(Categoria.lecciones),
-            joinedload(Categoria.tipo_rel)
-        ).filter(Categoria.id == categoria_id).first()
-
-        if not categoria:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Categoría con ID {categoria_id} no encontrada"
-            )
+        categoria = _obtener_o_404(db, categoria_id)
 
         categoria.activa = not categoria.activa
 
@@ -486,34 +513,16 @@ def cambiar_estado_categoria(
             categoria_dataset.activa = categoria.activa
 
         db.commit()
-        db.refresh(categoria)
-        db.refresh(categoria, ["tipo_rel"])
-
-        categoria_data = {
-            "id": categoria.id,
-            "nombre": categoria.nombre,
-            "tipo_id": categoria.tipo_id,
-            "tipo_valor": categoria.tipo_rel.valor if categoria.tipo_rel else None,
-            "tipo_etiqueta": categoria.tipo_rel.etiqueta if categoria.tipo_rel else None,
-            "descripcion": categoria.descripcion,
-            "icono": categoria.icono,
-            "color": categoria.color,
-            "orden": categoria.orden,
-            "nivel_requerido": categoria.nivel_requerido,
-            "activa": categoria.activa,
-            "total_lecciones": categoria.total_lecciones,
-            "fecha_creacion": categoria.fecha_creacion,
-            "fecha_actualizacion": categoria.fecha_actualizacion
-        }
 
         estado = "activada" if categoria.activa else "desactivada"
         return RespuestaAPI(
             exito=True,
             mensaje=f"Categoría '{categoria.nombre}' {estado} exitosamente",
-            datos=categoria_data
+            datos=_detalle(categoria, _total_lecciones(db, categoria_id))
         )
 
     except HTTPException:
+        db.rollback()
         raise
     except Exception as e:
         db.rollback()
@@ -530,26 +539,31 @@ def sincronizar_categorias_dataset(
 ):
     try:
         categorias = db.query(Categoria).all()
+
+        # Una sola consulta en lugar de una por categoría
+        con_dataset = {
+            fila[0]
+            for fila in db.query(CategoriaDataset.categoria_id)
+            .filter(CategoriaDataset.categoria_id.isnot(None))
+            .all()
+        }
+
         categorias_creadas = 0
         categorias_existentes = 0
 
         for categoria in categorias:
-            dataset_existe = db.query(CategoriaDataset).filter(
-                CategoriaDataset.categoria_id == categoria.id
-            ).first()
-
-            if not dataset_existe:
-                nueva_categoria_dataset = CategoriaDataset(
-                    nombre=categoria.nombre,
-                    descripcion=categoria.descripcion,
-                    categoria_id=categoria.id,
-                    activa=categoria.activa,
-                    orden=categoria.orden
-                )
-                db.add(nueva_categoria_dataset)
-                categorias_creadas += 1
-            else:
+            if categoria.id in con_dataset:
                 categorias_existentes += 1
+                continue
+
+            db.add(CategoriaDataset(
+                nombre=categoria.nombre,
+                descripcion=categoria.descripcion,
+                categoria_id=categoria.id,
+                activa=categoria.activa,
+                orden=categoria.orden
+            ))
+            categorias_creadas += 1
 
         db.commit()
 
@@ -571,6 +585,10 @@ def sincronizar_categorias_dataset(
         )
 
 
+# ---------------------------------------------------------------------------
+# Asignación de modelos
+# ---------------------------------------------------------------------------
+
 @router.patch("/{categoria_id}/asignar-modelo", response_model=RespuestaAPI)
 def asignar_modelo_a_categoria(
     categoria_id: int,
@@ -586,7 +604,6 @@ def asignar_modelo_a_categoria(
                 detail=f"Categoría {categoria_id} no encontrada"
             )
 
-        from app.modelos.entrenamiento import ModeloIA
         modelo = db.query(ModeloIA).filter(ModeloIA.id == modelo_id).first()
         if not modelo:
             raise HTTPException(
@@ -597,7 +614,6 @@ def asignar_modelo_a_categoria(
         modelo_anterior_id = categoria.modelo_ia_id
         categoria.modelo_ia_id = modelo_id
         db.commit()
-        db.refresh(categoria)
 
         mensaje = f"Modelo '{modelo.nombre}' asignado a categoría '{categoria.nombre}'"
         if modelo_anterior_id:
@@ -617,6 +633,7 @@ def asignar_modelo_a_categoria(
         )
 
     except HTTPException:
+        db.rollback()
         raise
     except Exception as e:
         db.rollback()
@@ -633,7 +650,12 @@ def desasignar_modelo_de_categoria(
     usuario_actual: Usuario = Depends(requiere_permiso("admin.categorias.gestionar"))
 ):
     try:
-        categoria = db.query(Categoria).filter(Categoria.id == categoria_id).first()
+        categoria = (
+            db.query(Categoria)
+            .options(_opcion_modelo())
+            .filter(Categoria.id == categoria_id)
+            .first()
+        )
         if not categoria:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -657,6 +679,7 @@ def desasignar_modelo_de_categoria(
         )
 
     except HTTPException:
+        db.rollback()
         raise
     except Exception as e:
         db.rollback()
@@ -681,6 +704,22 @@ def asignar_modelos_en_lote(
                 detail="No se proporcionaron asignaciones"
             )
 
+        # Precarga en 2 consultas (antes: 2-3 consultas por cada asignación)
+        ids_categoria = {a.categoria_id for a in asignaciones}
+        ids_modelo = {a.modelo_id for a in asignaciones if a.modelo_id is not None}
+
+        categorias = {
+            c.id: c
+            for c in db.query(Categoria)
+            .options(_opcion_modelo())
+            .filter(Categoria.id.in_(ids_categoria))
+            .all()
+        }
+        modelos = {
+            m.id: m
+            for m in db.query(ModeloIA).filter(ModeloIA.id.in_(ids_modelo)).all()
+        } if ids_modelo else {}
+
         asignaciones_exitosas = []
         asignaciones_fallidas = []
 
@@ -688,51 +727,43 @@ def asignar_modelos_en_lote(
             categoria_id = asignacion.categoria_id
             modelo_id = asignacion.modelo_id
 
-            try:
-                categoria = db.query(Categoria).filter(Categoria.id == categoria_id).first()
-                if not categoria:
+            categoria = categorias.get(categoria_id)
+            if not categoria:
+                asignaciones_fallidas.append({
+                    "categoria_id": categoria_id,
+                    "error": "Categoría no encontrada"
+                })
+                continue
+
+            modelo_anterior_id = categoria.modelo_ia_id
+            modelo_anterior_nombre = categoria.modelo_ia.nombre if categoria.modelo_ia else None
+
+            if modelo_id is not None:
+                modelo = modelos.get(modelo_id)
+                if not modelo:
                     asignaciones_fallidas.append({
                         "categoria_id": categoria_id,
-                        "error": "Categoría no encontrada"
+                        "error": f"Modelo {modelo_id} no encontrado"
                     })
                     continue
 
-                modelo_anterior_id = categoria.modelo_ia_id
-                modelo_anterior_nombre = categoria.modelo_ia.nombre if categoria.modelo_ia else None
+                categoria.modelo_ia_id = modelo_id
+                accion = "asignado"
+                modelo_nombre = modelo.nombre
+            else:
+                categoria.modelo_ia_id = None
+                accion = "desasignado"
+                modelo_nombre = None
 
-                if modelo_id is not None:
-                    from app.modelos.entrenamiento import ModeloIA
-                    modelo = db.query(ModeloIA).filter(ModeloIA.id == modelo_id).first()
-                    if not modelo:
-                        asignaciones_fallidas.append({
-                            "categoria_id": categoria_id,
-                            "error": f"Modelo {modelo_id} no encontrado"
-                        })
-                        continue
-
-                    categoria.modelo_ia_id = modelo_id
-                    accion = "asignado"
-                    modelo_nombre = modelo.nombre
-                else:
-                    categoria.modelo_ia_id = None
-                    accion = "desasignado"
-                    modelo_nombre = None
-
-                asignaciones_exitosas.append({
-                    "categoria_id": categoria_id,
-                    "categoria_nombre": categoria.nombre,
-                    "modelo_id": modelo_id,
-                    "modelo_nombre": modelo_nombre,
-                    "modelo_anterior_id": modelo_anterior_id,
-                    "modelo_anterior_nombre": modelo_anterior_nombre,
-                    "accion": accion
-                })
-
-            except Exception as e:
-                asignaciones_fallidas.append({
-                    "categoria_id": categoria_id,
-                    "error": str(e)
-                })
+            asignaciones_exitosas.append({
+                "categoria_id": categoria_id,
+                "categoria_nombre": categoria.nombre,
+                "modelo_id": modelo_id,
+                "modelo_nombre": modelo_nombre,
+                "modelo_anterior_id": modelo_anterior_id,
+                "modelo_anterior_nombre": modelo_anterior_nombre,
+                "accion": accion
+            })
 
         db.commit()
 
@@ -751,6 +782,9 @@ def asignar_modelos_en_lote(
             }
         )
 
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(

@@ -86,8 +86,8 @@ class ServicioReconocimiento:
 
         if torch.cuda.is_available():
             torch.backends.cudnn.enabled = True
-            torch.backends.cudnn.benchmark = False
-            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = True
+            torch.backends.cudnn.deterministic = False
             torch.cuda.empty_cache()
             try:
                 prueba = torch.randn(1, 20, 126).cuda()
@@ -111,7 +111,7 @@ class ServicioReconocimiento:
             if not Path(ruta_modelo).exists():
                 raise FileNotFoundError(f"Modelo no encontrado: {ruta_modelo}")
 
-            checkpoint = torch.load(ruta_modelo, map_location=self.device, weights_only=False)
+            checkpoint = torch.load(ruta_modelo, map_location=self.device, weights_only=True)
 
             self.num_clases = checkpoint['num_clases']
             self.clases = checkpoint['clases']
@@ -229,6 +229,27 @@ class ServicioReconocimiento:
 
             return probs.cpu().numpy()
 
+    def _debe_usar_tta(self, tipo_sena: str) -> bool:
+        if not self.usar_tta:
+            return False
+        return (tipo_sena or 'DINAMICA').upper() == 'DINAMICA'
+
+    def probabilidades(self, tensor_keypoints: torch.Tensor, tipo_sena: str = 'DINAMICA') -> np.ndarray:
+        if tensor_keypoints.device != self.device:
+            tensor_keypoints = tensor_keypoints.to(self.device)
+
+        usar_tta_aqui = self._debe_usar_tta(tipo_sena)
+
+        if usar_tta_aqui and tensor_keypoints.shape[0] == 1:
+            variantes = _variantes_tta(tensor_keypoints[0].cpu().numpy())
+            acumulado = np.zeros(len(self.clases), dtype=np.float64)
+            for v in variantes:
+                t = torch.from_numpy(v).float().unsqueeze(0).to(self.device)
+                acumulado += self._predecir_tensor(t, tipo_sena)[0]
+            return (acumulado / len(variantes)).astype(np.float32)
+
+        return self._predecir_tensor(tensor_keypoints, tipo_sena)[0]
+
     def predecir(self, tensor_keypoints: torch.Tensor, tipo_sena: str = None,
                  sena_esperada: str = None) -> Tuple[str, float, Dict]:
         if self.model is None or len(self.clases) == 0:
@@ -240,19 +261,7 @@ class ServicioReconocimiento:
 
             tipo_sena = tipo_sena or 'DINAMICA'
 
-            if self.usar_tta and tensor_keypoints.shape[0] == 1:
-                secuencia_np = tensor_keypoints[0].cpu().numpy()
-                variantes = _variantes_tta(secuencia_np)
-
-                acumulado = np.zeros(len(self.clases), dtype=np.float64)
-                for v in variantes:
-                    t = torch.from_numpy(v).float().unsqueeze(0).to(self.device)
-                    probs = self._predecir_tensor(t, tipo_sena)[0]
-                    acumulado += probs
-
-                probabilities_np = (acumulado / len(variantes)).astype(np.float32)
-            else:
-                probabilities_np = self._predecir_tensor(tensor_keypoints, tipo_sena)[0]
+            probabilities_np = self.probabilidades(tensor_keypoints, tipo_sena)
 
             indice_predicho = int(np.argmax(probabilities_np))
             confianza = float(probabilities_np[indice_predicho])
@@ -281,7 +290,7 @@ class ServicioReconocimiento:
                 "factor_confusion": factor_confusion,
                 "es_confusion_conocida": factor_confusion > 1.0,
                 "modo": "keypoints_lstm",
-                "tta_aplicado": self.usar_tta and tensor_keypoints.shape[0] == 1,
+                "tta_aplicado": self._debe_usar_tta(tipo_sena) and tensor_keypoints.shape[0] == 1,
                 "temperatura": self.temperatura
             }
 
