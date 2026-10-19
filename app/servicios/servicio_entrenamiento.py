@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from threading import Lock
 from datetime import datetime
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from typing import Dict, Any, List, Optional, Tuple
 
 import torch
@@ -18,6 +18,7 @@ import numpy as np
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sklearn.model_selection import StratifiedShuffleSplit
 
@@ -49,6 +50,7 @@ from app.utilidades.augmentation_inteligente import (
     obtener_parametros_entrenamiento_optimizados,
     validar_configuracion_dataset,
 )
+from app.utilidades.normalizar_manos import normalizar_una_mano
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,22 @@ progresos_entrenamiento: Dict[str, Any] = {}
 _lock_progresos = Lock()
 
 SEED_ENTRENAMIENTO = 42
+ROL_BD_ENTRENAMIENTO = "rol_bd_admin"
+EPSILON_SCORE = 1e-9
+
+
+def _asumir_rol_entrenamiento(db: Session) -> None:
+    db.execute(text(f"SET LOCAL ROLE {ROL_BD_ENTRENAMIENTO}"))
+
+
+@contextmanager
+def _sesion_entrenamiento():
+    db = SessionLocal()
+    try:
+        _asumir_rol_entrenamiento(db)
+        yield db
+    finally:
+        db.close()
 
 
 def _fijar_semillas(seed: int = SEED_ENTRENAMIENTO) -> None:
@@ -144,7 +162,6 @@ def aplicar_augmentation_keypoints(secuencia: np.ndarray, config: Dict, es_entre
 
     rotacion_max = float(config.get('augmentation_rotation', 8.0))
     permite_zoom = config.get('permite_zoom', True)
-    permite_flip = config.get('permite_flip', True)
 
     if random.random() < 0.9:
         grados = np.random.uniform(-rotacion_max, rotacion_max)
@@ -315,13 +332,10 @@ class ServicioEntrenamientoUnificado:
     def _cargar_videos_orm(self, ids: List[int]) -> List[VideoDataset]:
         if not ids:
             return []
-        db = SessionLocal()
-        try:
+        with _sesion_entrenamiento() as db:
             videos = db.query(VideoDataset).filter(VideoDataset.id.in_(ids)).all()
             db.expunge_all()
             return videos
-        finally:
-            db.close()
 
     def validar_dataset_entrenamiento(self, categoria_ids: List[int], db: Session) -> Dict[str, Any]:
         try:
@@ -418,34 +432,32 @@ class ServicioEntrenamientoUnificado:
                     "advertencias_dataset": p.get("advertencias_dataset", [])
                 }
 
-        db = SessionLocal()
         try:
-            modelo_db = db.query(ModeloIA).filter(ModeloIA.nombre == nombre_modelo).first()
-            if not modelo_db:
-                return self._progreso_por_defecto(nombre_modelo, "preparando", "Inicializando entrenamiento...", True)
-            clases = json.loads(modelo_db.clases_json) if modelo_db.clases_json else []
-            return {
-                "nombre_modelo": modelo_db.nombre,
-                "estado": "completado" if modelo_db.activo else "inactivo",
-                "progreso": 100.0 if modelo_db.activo else 0.0,
-                "epoch_actual": modelo_db.epocas_entrenamiento or 0,
-                "total_epochs": modelo_db.epocas_entrenamiento or 0,
-                "accuracy": float(modelo_db.accuracy) if modelo_db.accuracy else 0.0,
-                "loss": 0.0, "train_loss": 0.0, "train_accuracy": 0.0,
-                "num_clases": modelo_db.num_clases or 0,
-                "clases": clases,
-                "total_videos": modelo_db.total_imagenes or 0,
-                "frames_procesados": (modelo_db.total_imagenes or 0) * self.num_frames,
-                "total_frames": (modelo_db.total_imagenes or 0) * self.num_frames,
-                "fecha_entrenamiento": modelo_db.fecha_entrenamiento.isoformat() if modelo_db.fecha_entrenamiento else None,
-                "mensaje": "Modelo completado previamente" if modelo_db.activo else "Modelo inactivo",
-                "entrenando": False
-            }
+            with _sesion_entrenamiento() as db:
+                modelo_db = db.query(ModeloIA).filter(ModeloIA.nombre == nombre_modelo).first()
+                if not modelo_db:
+                    return self._progreso_por_defecto(nombre_modelo, "preparando", "Inicializando entrenamiento...", True)
+                clases = json.loads(modelo_db.clases_json) if modelo_db.clases_json else []
+                return {
+                    "nombre_modelo": modelo_db.nombre,
+                    "estado": "completado" if modelo_db.activo else "inactivo",
+                    "progreso": 100.0 if modelo_db.activo else 0.0,
+                    "epoch_actual": modelo_db.epocas_entrenamiento or 0,
+                    "total_epochs": modelo_db.epocas_entrenamiento or 0,
+                    "accuracy": float(modelo_db.accuracy) if modelo_db.accuracy else 0.0,
+                    "loss": 0.0, "train_loss": 0.0, "train_accuracy": 0.0,
+                    "num_clases": modelo_db.num_clases or 0,
+                    "clases": clases,
+                    "total_videos": modelo_db.total_imagenes or 0,
+                    "frames_procesados": (modelo_db.total_imagenes or 0) * self.num_frames,
+                    "total_frames": (modelo_db.total_imagenes or 0) * self.num_frames,
+                    "fecha_entrenamiento": modelo_db.fecha_entrenamiento.isoformat() if modelo_db.fecha_entrenamiento else None,
+                    "mensaje": "Modelo completado previamente" if modelo_db.activo else "Modelo inactivo",
+                    "entrenando": False
+                }
         except Exception as e:
             logger.error(f"Error consultando progreso: {e}")
             return self._progreso_por_defecto(nombre_modelo, "error", f"Error consultando: {e}", False)
-        finally:
-            db.close()
 
     def _actualizar_progreso(self, nombre_modelo: str, **campos):
         with _lock_progresos:
@@ -477,7 +489,7 @@ class ServicioEntrenamientoUnificado:
             return False, None
         if not (estado > 0).any():
             return True, None
-        return True, self._ajustar_longitud(secuencia.astype(np.float32))
+        return True, self._ajustar_longitud(normalizar_una_mano(secuencia.astype(np.float32)))
 
     def _guardar_secuencia(self, video_id: int, resultado: ResultadoSecuencia) -> None:
         try:
@@ -500,11 +512,8 @@ class ServicioEntrenamientoUnificado:
             return None
 
     def _preparar_secuencias(self, categoria_ids: List[int], nombre_modelo: str) -> Tuple[List[np.ndarray], List[str]]:
-        db = SessionLocal()
-        try:
+        with _sesion_entrenamiento() as db:
             videos = self._obtener_videos_utilizables(categoria_ids, db)
-        finally:
-            db.close()
 
         logger.info(f"Videos aprobados a procesar: {len(videos)}")
 
@@ -581,7 +590,7 @@ class ServicioEntrenamientoUnificado:
                 self._guardar_secuencia(video_id, resultado)
 
                 if (resultado.estado > 0).any():
-                    secuencias.append(resultado.secuencia)
+                    secuencias.append(normalizar_una_mano(resultado.secuencia))
                     senas.append(sena)
 
         if len(secuencias) < 20:
@@ -592,10 +601,6 @@ class ServicioEntrenamientoUnificado:
 
     def entrenar(self, nombre_modelo: str, categoria_ids: List[int], epochs: int,
                  desactivar_otros: bool = True):
-        """
-        desactivar_otros=True  -> al terminar, el modelo nuevo queda como único activo (comportamiento anterior).
-        desactivar_otros=False -> el modelo nuevo se activa SIN apagar los demás (modo ensemble).
-        """
         _fijar_semillas()
 
         model = train_loader = val_loader = None
@@ -718,6 +723,8 @@ class ServicioEntrenamientoUnificado:
 
             best_accuracy = 0.0
             mejor_score = -1.0
+            mejor_loss = float('inf')
+            mejor_epoca = 0
             best_model_state = None
             patience_counter = 0
             matriz_confusion_val = np.zeros((len(clases), len(clases)), dtype=int)
@@ -814,8 +821,15 @@ class ServicioEntrenamientoUnificado:
                             f"Peor clase: {min_class_acc:.4f}"
                 )
 
-                if score_compuesto > mejor_score:
-                    mejor_score = score_compuesto
+                mejora_score = score_compuesto > mejor_score + EPSILON_SCORE
+                empate_con_menor_loss = (
+                    abs(score_compuesto - mejor_score) <= EPSILON_SCORE and avg_val_loss < mejor_loss
+                )
+
+                if mejora_score or empate_con_menor_loss:
+                    mejor_score = max(mejor_score, score_compuesto)
+                    mejor_loss = avg_val_loss
+                    mejor_epoca = epoch + 1
                     best_accuracy = val_acc
                     best_model_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
                     matriz_confusion_val = matriz_confusion_epoch.copy()
@@ -825,17 +839,19 @@ class ServicioEntrenamientoUnificado:
 
                 if (epoch + 1) % 10 == 0 or epoch == 0 or epoch == epochs - 1:
                     logger.info(f"Época {epoch + 1:3d}/{epochs} | Train: {train_acc:.4f} | "
-                                f"Val: {val_acc:.4f} | Best: {best_accuracy:.4f} | "
-                                f"Peor clase: {min_class_acc:.4f}")
+                                f"Val: {val_acc:.4f} | ValLoss: {avg_val_loss:.4f} | Best: {best_accuracy:.4f} "
+                                f"(época {mejor_epoca}) | Peor clase: {min_class_acc:.4f}")
 
                 if patience_counter >= patience:
-                    logger.info(f"Early stopping en época {epoch + 1}")
+                    logger.info(f"Early stopping en época {epoch + 1} (mejor modelo: época {mejor_epoca})")
                     break
 
                 if (epoch + 1) % 10 == 0:
                     gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+
+            logger.info(f"Modelo seleccionado de la época {mejor_epoca} con val_loss={mejor_loss:.4f}")
 
             if best_accuracy < self.min_accuracy:
                 raise Exception(f"Accuracy insuficiente: {best_accuracy * 100:.2f}%")
@@ -855,8 +871,8 @@ class ServicioEntrenamientoUnificado:
             if clases_debiles:
                 logger.warning(
                     f"Estas clases quedaron por debajo de {self.min_accuracy_por_clase * 100:.0f}% de accuracy: "
-                    f"{clases_debiles}. Si alguna es una letra que ya regrabaste (ej. B), revisa la calidad e "
-                    f"iluminación de esos videos, o agrega más ejemplos de esa seña."
+                    f"{clases_debiles}. Revisa la calidad e iluminación de esos videos "
+                    f"o agrega más ejemplos de esa seña."
                 )
 
             ruta_modelo = self._guardar_modelo(model, nombre_modelo, clases, best_accuracy, tipos_senas,
@@ -916,6 +932,7 @@ class ServicioEntrenamientoUnificado:
             'arquitectura': 'ModeloAdaptativoSenas_LSTM',
             'framework': 'pytorch_lstm_keypoints',
             'extractor_version': 'secuencias_v3',
+            'normalizacion_una_mano': True,
             'tipos_senas': tipos_senas,
             'fecha_entrenamiento': datetime.now().isoformat(),
             'version': '11.0'
@@ -935,6 +952,8 @@ class ServicioEntrenamientoUnificado:
 
         for intento in range(3):
             try:
+                _asumir_rol_entrenamiento(db)
+
                 modelo_db = db.query(ModeloIA).filter(ModeloIA.nombre == nombre_modelo).first()
 
                 if not modelo_db:
@@ -974,15 +993,16 @@ class ServicioEntrenamientoUnificado:
                     modelo_db.version = "11.0"
                     modelo_db.num_frames = self.num_frames
 
+                modelo_id = modelo_db.id
+
                 if desactivar_otros:
                     db.query(ModeloIA).filter(
                         ModeloIA.activo == True,
-                        ModeloIA.id != modelo_db.id
+                        ModeloIA.id != modelo_id
                     ).update({"activo": False}, synchronize_session=False)
 
                 db.commit()
-                db.refresh(modelo_db)
-                logger.info(f"Modelo {nombre_modelo} activado (id={modelo_db.id}, desactivar_otros={desactivar_otros})")
+                logger.info(f"Modelo {nombre_modelo} activado (id={modelo_id}, desactivar_otros={desactivar_otros})")
                 return
 
             except Exception as e:
@@ -993,8 +1013,7 @@ class ServicioEntrenamientoUnificado:
                     db.close()
                 except Exception:
                     pass
-                from app.utilidades.base_datos import SessionLocal as _SL
-                db = _SL()
+                db = SessionLocal()
 
         logger.error(f"No se pudo actualizar BD tras 3 intentos: {ultimo_error}")
         raise ultimo_error

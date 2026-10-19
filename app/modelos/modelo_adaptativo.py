@@ -1,8 +1,26 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+class BatchNorm1dSeguro(nn.BatchNorm1d):
+
+    def forward(self, x):
+        if self.training and x.dim() == 2 and x.size(0) == 1:
+            return F.batch_norm(
+                x,
+                self.running_mean,
+                self.running_var,
+                self.weight,
+                self.bias,
+                False,
+                0.0,
+                self.eps
+            )
+        return super().forward(x)
 
 
 class ModeloAdaptativoSenas(nn.Module):
@@ -19,9 +37,6 @@ class ModeloAdaptativoSenas(nn.Module):
         self.hidden_size = 256
         self.num_layers = 2
 
-        # num_layers=1: no se pasa dropout aquí porque PyTorch lo ignora
-        # silenciosamente en LSTM de una sola capa (y antes generaba un warning
-        # sin aportar ninguna regularización real).
         self.lstm_estatico = nn.LSTM(
             input_size=self.input_size_una_mano,
             hidden_size=128,
@@ -44,11 +59,6 @@ class ModeloAdaptativoSenas(nn.Module):
             nn.Sigmoid()
         )
 
-        # Atención temporal para señas estáticas: en vez de quedarnos solo con
-        # el último frame (que puede salir borroso/mal detectado), promediamos
-        # las frames centrales ponderadas por qué tan "confiable" es cada una.
-        # Esto ayuda a diferenciar formas de mano parecidas (B/D/P/1/4/R) porque
-        # ya no depende de un único frame para decidir.
         self.temporal_attention_estatico = nn.Sequential(
             nn.Linear(128, 64),
             nn.ReLU(inplace=True),
@@ -59,7 +69,7 @@ class ModeloAdaptativoSenas(nn.Module):
         self.classifier_estatico = nn.Sequential(
             nn.Dropout(0.3),
             nn.Linear(128, 128),
-            nn.BatchNorm1d(128),
+            BatchNorm1dSeguro(128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
             nn.Linear(128, num_classes)
@@ -68,11 +78,11 @@ class ModeloAdaptativoSenas(nn.Module):
         self.classifier_dinamico = nn.Sequential(
             nn.Dropout(0.4),
             nn.Linear(self.hidden_size, 256),
-            nn.BatchNorm1d(256),
+            BatchNorm1dSeguro(256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
             nn.Linear(256, 128),
-            nn.BatchNorm1d(128),
+            BatchNorm1dSeguro(128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
             nn.Linear(128, num_classes)
@@ -106,24 +116,9 @@ class ModeloAdaptativoSenas(nn.Module):
             raise ValueError(f"Input incorrecto: {features} features, esperado {esperado}")
 
     def _seleccionar_mano_valida(self, x):
-        """
-        Elige, para CADA frame, qué slot (0 o 1) trae la mano realmente detectada.
-
-        Antes esta decisión se tomaba una sola vez para todo el video (sumando
-        la energía de las 20 frames y comparando), lo que es frágil: si
-        MediaPipe etiqueta 'Right'/'Left' de forma inconsistente entre frames
-        del mismo video (común con cámara espejada), un par de frames mal
-        etiquetadas pueden inclinar la suma total hacia el slot equivocado y
-        el modelo termina descartando TODAS las frames del slot correcto.
-
-        Ahora la comparación es por frame: cada frame decide de forma
-        independiente cuál de los dos slots tiene señal real, así una
-        etiqueta inconsistente en algunos frames ya no arruina el resto de
-        la secuencia.
-        """
         mitad_a = x[:, :, :self.input_size_una_mano]
         mitad_b = x[:, :, self.input_size_una_mano:]
-        energia_a = mitad_a.abs().sum(dim=2, keepdim=True)  # (batch, frames, 1)
+        energia_a = mitad_a.abs().sum(dim=2, keepdim=True)
         energia_b = mitad_b.abs().sum(dim=2, keepdim=True)
         usar_b = energia_b > energia_a
         return torch.where(usar_b, mitad_b, mitad_a)
@@ -143,7 +138,7 @@ class ModeloAdaptativoSenas(nn.Module):
         x_input = x[:, start_idx:start_idx + frames_usar].contiguous()
 
         lstm_out, _ = self.lstm_estatico(x_input)
-        pesos = self.temporal_attention_estatico(lstm_out)  # (batch, frames_usar, 1)
+        pesos = self.temporal_attention_estatico(lstm_out)
         features_finales = torch.sum(lstm_out * pesos, dim=1) / (torch.sum(pesos, dim=1) + 1e-6)
         return self.classifier_estatico(features_finales)
 
@@ -195,7 +190,7 @@ class ModeloAdaptativoSenas(nn.Module):
 
 def cargar_modelo_adaptativo(ruta_modelo, device):
     try:
-        checkpoint = torch.load(ruta_modelo, map_location=device, weights_only=False)
+        checkpoint = torch.load(ruta_modelo, map_location=device, weights_only=True)
         clases = checkpoint.get('clases', [])
         tipos_senas = checkpoint.get('tipos_senas', {})
         num_clases = len(clases)

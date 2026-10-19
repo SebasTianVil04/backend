@@ -2,7 +2,6 @@ import os
 import importlib
 import threading
 import traceback
-from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,8 +25,8 @@ PREFIJOS_SIN_CACHE = (
     "/api/v1/auth",
     "/api/v1/archivos/firmar",
     "/api/v1/archivos/video-dataset",
+    "/api/v1/exportacion-dataset",
 )
-
 
 REGISTRO_ROUTERS = [
     ("autenticacion", "/api/v1"),
@@ -48,6 +47,7 @@ REGISTRO_ROUTERS = [
     ("estadisticas_rutas", "/api/v1"),
     ("tipos_categoria", "/api/v1"),
     ("categorias_dataset", "/api/v1"),
+    ("exportacion_dataset", "/api/v1"),
     ("senas_categoria", "/api/v1"),
     ("roles", ""),
     ("menu", "/api/v1"),
@@ -74,7 +74,7 @@ app = FastAPI(
     redoc_url=None if ES_PRODUCCION else "/redoc",
     openapi_url=None if ES_PRODUCCION else "/openapi.json",
     redirect_slashes=False,
-    dependencies=[Depends(verificar_csrf)]
+    dependencies=[Depends(verificar_csrf)],
 )
 
 
@@ -88,11 +88,8 @@ async def log_requests(request: Request, call_next):
         path = f"{PREFIJO_ARCHIVO_FIRMADO}[token]"
 
     log(f"IN {method} {path} | Origin: {origin}")
-
     response = await call_next(request)
-
     log(f"OUT {method} {path} | Status: {response.status_code}")
-
     return response
 
 
@@ -123,7 +120,7 @@ app.add_middleware(
         "Origin",
         "X-Requested-With",
     ],
-    expose_headers=["Content-Length"],
+    expose_headers=["Content-Length", "Content-Disposition"],
     max_age=600,
 )
 log("CORS configurado")
@@ -151,9 +148,9 @@ def crear_directorios():
 
 def sembrar_datos_iniciales():
     try:
-        from app.utilidades.base_datos import SessionLocal
+        from app.utilidades.base_datos import SessionOwner
     except Exception as e:
-        log(f"No se pudo importar SessionLocal: {e}")
+        log(f"No se pudo importar SessionOwner: {e}")
         return
 
     try:
@@ -180,20 +177,17 @@ def sembrar_datos_iniciales():
         log(f"Seed menú no disponible: {e}")
         seed_menu = None
 
-    db = SessionLocal()
+    db = SessionOwner()
     try:
         if seed_permisos:
             seed_permisos(db)
             log("Permisos sembrados")
-
         if seed_roles:
             seed_roles(db)
             log("Roles sembrados")
-
         if seed_admin:
             seed_admin(db)
             log("Admin principal verificado/sembrado")
-
         if seed_menu:
             seed_menu(db)
             log("Menú sembrado")
@@ -222,8 +216,6 @@ def inicializar_base_de_datos(timeout_segundos: int = 60):
     if hilo.is_alive():
         log(f"ADVERTENCIA: la inicialización de la BD no terminó en {timeout_segundos}s.")
         log("El hilo sigue corriendo en segundo plano; los seeds se ejecutarán cuando termine.")
-        log("Si el error persiste, verifica la conexión a Supabase o ejecuta manualmente:")
-        log("  .venv\\Scripts\\python.exe -m app.semillas.ejecutar_seeds")
         return False
 
     if resultado["error"] is not None:
@@ -281,7 +273,7 @@ async def root():
         "version": "2.0.0",
         "estado": "activo",
         "mensaje": "Bienvenido a SignaFree API",
-        "salud": "/health"
+        "salud": "/health",
     }
     if not ES_PRODUCCION:
         respuesta["documentacion"] = "/docs"
@@ -290,10 +282,7 @@ async def root():
 
 @app.get("/health", tags=["General"])
 async def health_check():
-    return {
-        "estado": "saludable",
-        "version": "2.0.0"
-    }
+    return {"estado": "saludable", "version": "2.0.0"}
 
 
 @app.get("/api/v1/test-cors", tags=["General"])
@@ -308,9 +297,9 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
         content={
             "error": True,
             "mensaje": exc.detail,
-            "codigo": exc.status_code
+            "codigo": exc.status_code,
         },
-        headers=getattr(exc, "headers", None)
+        headers=getattr(exc, "headers", None),
     )
 
 
@@ -327,8 +316,8 @@ async def general_exception_handler(request: Request, exc: Exception):
             "error": True,
             "mensaje": f"Error interno: {str(exc)}" if DEBUG_ACTIVO else "Error interno del servidor",
             "detalle": error_traceback if DEBUG_ACTIVO else None,
-            "codigo": 500
-        }
+            "codigo": 500,
+        },
     )
 
 
@@ -344,5 +333,5 @@ if __name__ == "__main__":
         host=configuracion.host,
         port=configuracion.port,
         reload=DEBUG_ACTIVO,
-        log_level="info"
+        log_level="info",
     )

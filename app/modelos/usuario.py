@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, deferred
 from ..utilidades.base_datos import Base
 from .mixins import AuditoriaMixin
 
@@ -14,7 +14,9 @@ class Usuario(AuditoriaMixin, Base):
 
     nombre_usuario = Column(String(30), unique=True, index=True, nullable=False)
     email = Column(String(255), unique=True, index=True, nullable=False)
-    password_hash = Column(String(512), nullable=False)
+
+
+    password_hash = deferred(Column(String(512), nullable=False))
 
     activo = Column(Boolean, default=True)
     verificado = Column(Boolean, default=False)

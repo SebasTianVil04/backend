@@ -7,6 +7,8 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
+from app.utilidades.normalizar_manos import normalizar_una_mano
+
 logger = logging.getLogger(__name__)
 
 FEATURES_POR_MANO = 63
@@ -25,6 +27,7 @@ class ResultadoSecuencia:
     frames_detectados: int
     keypoints_validos: int
     calidad: float
+    lateralidad: str = "no_detectada"
 
 
 def crear_detector_manos(
@@ -119,6 +122,19 @@ def normalizar_filas(filas: np.ndarray) -> np.ndarray:
     return normalizado
 
 
+def _lateralidad_de_secuencia(secuencia: np.ndarray) -> str:
+    hay_derecha = bool(np.any(secuencia[:, :FEATURES_POR_MANO] != 0))
+    hay_izquierda = bool(np.any(secuencia[:, FEATURES_POR_MANO:] != 0))
+
+    if hay_derecha and hay_izquierda:
+        return "ambas"
+    if hay_derecha:
+        return "derecha"
+    if hay_izquierda:
+        return "izquierda"
+    return "no_detectada"
+
+
 def _leer_video(ruta_video: str, hands, paso: int):
     cap = cv2.VideoCapture(ruta_video)
     if not cap.isOpened():
@@ -186,6 +202,7 @@ def construir_secuencia(
         frames_detectados=0,
         keypoints_validos=0,
         calidad=0.5,
+        lateralidad="no_detectada",
     )
 
     if n == 0:
@@ -217,6 +234,9 @@ def construir_secuencia(
     secuencia = datos[indices]
     estado = estado_frame[indices]
 
+    lateralidad = _lateralidad_de_secuencia(secuencia)
+    secuencia = normalizar_una_mano(secuencia)
+
     keypoints_validos = int((estado == 2).sum())
 
     detectados = presencias.any(axis=1)
@@ -225,7 +245,8 @@ def construir_secuencia(
 
     logger.info(
         f"Secuencia: {frames_totales} frames, {frames_detectados} con mano, "
-        f"tramo útil {len(datos)} frames, {keypoints_validos}/{num_frames} válidos"
+        f"tramo útil {len(datos)} frames, {keypoints_validos}/{num_frames} válidos, "
+        f"lateralidad={lateralidad}"
     )
 
     return ResultadoSecuencia(
@@ -236,6 +257,7 @@ def construir_secuencia(
         frames_detectados=frames_detectados,
         keypoints_validos=keypoints_validos,
         calidad=calidad,
+        lateralidad=lateralidad,
     )
 
 
@@ -324,17 +346,4 @@ def secuencia_desde_keypoints(
 def detectar_lateralidad(resultado: ResultadoSecuencia) -> str:
     if resultado.frames_detectados == 0:
         return "no_detectada"
-
-    mitad_derecha = resultado.secuencia[:, :FEATURES_POR_MANO]
-    mitad_izquierda = resultado.secuencia[:, FEATURES_POR_MANO:]
-
-    hay_derecha = bool(np.any(mitad_derecha != 0))
-    hay_izquierda = bool(np.any(mitad_izquierda != 0))
-
-    if hay_derecha and hay_izquierda:
-        return "ambas"
-    if hay_derecha:
-        return "derecha"
-    if hay_izquierda:
-        return "izquierda"
-    return "no_detectada"
+    return resultado.lateralidad

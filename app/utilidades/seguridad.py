@@ -1,4 +1,3 @@
-# app/utilidades/seguridad.py
 import hashlib
 import hmac
 import logging
@@ -11,24 +10,28 @@ from fastapi import Depends, HTTPException, Request, Response, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import or_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from .auditoria import marcar_usuario_actual
-from .base_datos import obtener_bd
+from .base_datos import como_auth, fijar_contexto_bd, obtener_bd
 from .configuracion import configuracion
 from ..modelos.usuario import Usuario
 from ..modelos.sesion_usuario import SesionUsuario
 
 logger = logging.getLogger("signafree.seguridad")
 
-contexto_password = CryptContext(schemes=["bcrypt"], deprecated="auto")
+contexto_password = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__rounds=configuracion.bcrypt_rounds,
+)
 
 COOKIE_ACCESS = "access_token"
 COOKIE_REFRESH = "refresh_token"
 COOKIE_CSRF = "csrf_token"
 HEADER_CSRF = "X-CSRF-Token"
 
-GRACIA_ROTACION_SEG = 10  # tolera 2 pestañas refrescando a la vez sin marcarlo como robo
+GRACIA_ROTACION_SEG = 10
 
 CREDENCIALES_INVALIDAS = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -36,9 +39,6 @@ CREDENCIALES_INVALIDAS = HTTPException(
 )
 
 
-# ======================================================================
-# Passwords
-# ======================================================================
 def _prehash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
@@ -58,13 +58,9 @@ _HASH_FALSO = contexto_password.hash(_prehash_password("hash-falso-para-igualar-
 
 
 def verificar_password_falso(password_plano: str) -> None:
-    """Gasta el mismo tiempo que una verificación real (evita enumerar usuarios por timing)."""
     verificar_password(password_plano, _HASH_FALSO)
 
 
-# ======================================================================
-# Utilidades internas
-# ======================================================================
 def _ahora() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -77,9 +73,6 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-# ======================================================================
-# Access token (JWT corto, viaja en cookie HttpOnly)
-# ======================================================================
 def crear_access_token(usuario_id: int, sesion_id: int, expires_delta: Optional[timedelta] = None) -> str:
     ahora = _ahora()
     expira = ahora + (expires_delta or timedelta(minutes=configuracion.access_token_expire_minutes))
@@ -94,9 +87,6 @@ def crear_access_token(usuario_id: int, sesion_id: int, expires_delta: Optional[
     return jwt.encode(payload, configuracion.secret_key, algorithm=configuracion.algorithm)
 
 
-# ======================================================================
-# Sesiones (refresh token opaco + rotación + revocación)
-# ======================================================================
 def crear_sesion(bd: Session, usuario: Usuario, request: Request) -> Tuple[SesionUsuario, str]:
     refresh = secrets.token_urlsafe(48)
     ahora = _ahora()
@@ -113,8 +103,7 @@ def crear_sesion(bd: Session, usuario: Usuario, request: Request) -> Tuple[Sesio
         user_agent=(request.headers.get("user-agent") or "")[:255],
     )
     bd.add(sesion)
-    bd.commit()
-    bd.refresh(sesion)
+    bd.flush()
     return sesion, refresh
 
 
@@ -126,118 +115,146 @@ def _revocar(bd: Session, sesion: SesionUsuario, motivo: str) -> None:
 
 
 def rotar_sesion(bd: Session, refresh_plano: str) -> Tuple[SesionUsuario, str]:
-    """Valida el refresh, lo invalida y entrega uno nuevo (rotación)."""
-    h = _hash_token(refresh_plano)
-    sesion = bd.query(SesionUsuario).filter(
-        or_(SesionUsuario.refresh_hash == h, SesionUsuario.refresh_hash_anterior == h)
-    ).first()
+    with como_auth(bd):
+        h = _hash_token(refresh_plano)
+        sesion = bd.query(SesionUsuario).filter(
+            or_(SesionUsuario.refresh_hash == h, SesionUsuario.refresh_hash_anterior == h)
+        ).first()
 
-    if not sesion or sesion.revocada:
-        raise CREDENCIALES_INVALIDAS
-
-    ahora = _ahora()
-
-    if sesion.refresh_hash != h:
-        # Se presentó un refresh que ya fue rotado.
-        rotada_en = _aware(sesion.rotada_en) if sesion.rotada_en else None
-        dentro_de_gracia = rotada_en and (ahora - rotada_en).total_seconds() <= GRACIA_ROTACION_SEG
-        if not dentro_de_gracia:
-            logger.warning("Reutilización de refresh token: sesion_id=%s usuario_id=%s",
-                           sesion.id, sesion.usuario_id)
-            _revocar(bd, sesion, "reutilizacion_refresh")
+        if not sesion or sesion.revocada:
             raise CREDENCIALES_INVALIDAS
 
-    if _aware(sesion.expira_en) <= ahora or _aware(sesion.expira_absoluta_en) <= ahora:
-        _revocar(bd, sesion, "expirada")
-        raise CREDENCIALES_INVALIDAS
+        ahora = _ahora()
 
-    usuario = bd.get(Usuario, sesion.usuario_id)
-    if not usuario or not usuario.activo:
-        _revocar(bd, sesion, "usuario_inactivo")
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
+        if sesion.refresh_hash != h:
+            rotada_en = _aware(sesion.rotada_en) if sesion.rotada_en else None
+            dentro_de_gracia = rotada_en and (ahora - rotada_en).total_seconds() <= GRACIA_ROTACION_SEG
+            if not dentro_de_gracia:
+                logger.warning("Reutilización de refresh token: sesion_id=%s usuario_id=%s",
+                               sesion.id, sesion.usuario_id)
+                _revocar(bd, sesion, "reutilizacion_refresh")
+                raise CREDENCIALES_INVALIDAS
 
-    nuevo = secrets.token_urlsafe(48)
-    sesion.refresh_hash_anterior = sesion.refresh_hash
-    sesion.refresh_hash = _hash_token(nuevo)
-    sesion.rotada_en = ahora
-    sesion.ultimo_uso = ahora
-    sesion.expira_en = min(
-        ahora + timedelta(days=configuracion.refresh_token_expire_days),
-        _aware(sesion.expira_absoluta_en),
-    )
-    bd.commit()
-    return sesion, nuevo
+        if _aware(sesion.expira_en) <= ahora or _aware(sesion.expira_absoluta_en) <= ahora:
+            _revocar(bd, sesion, "expirada")
+            raise CREDENCIALES_INVALIDAS
+
+        usuario = bd.get(Usuario, sesion.usuario_id)
+        if not usuario or not usuario.activo:
+            _revocar(bd, sesion, "usuario_inactivo")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
+
+        nuevo = secrets.token_urlsafe(48)
+        sesion.refresh_hash_anterior = sesion.refresh_hash
+        sesion.refresh_hash = _hash_token(nuevo)
+        sesion.rotada_en = ahora
+        sesion.ultimo_uso = ahora
+        sesion.expira_en = min(
+            ahora + timedelta(days=configuracion.refresh_token_expire_days),
+            _aware(sesion.expira_absoluta_en),
+        )
+        bd.commit()
+        return sesion, nuevo
 
 
 def revocar_sesion_por_refresh(bd: Session, refresh_plano: str, motivo: str = "logout") -> None:
-    h = _hash_token(refresh_plano)
-    sesion = bd.query(SesionUsuario).filter(
-        or_(SesionUsuario.refresh_hash == h, SesionUsuario.refresh_hash_anterior == h)
-    ).first()
-    if sesion and not sesion.revocada:
-        _revocar(bd, sesion, motivo)
+    with como_auth(bd):
+        h = _hash_token(refresh_plano)
+        sesion = bd.query(SesionUsuario).filter(
+            or_(SesionUsuario.refresh_hash == h, SesionUsuario.refresh_hash_anterior == h)
+        ).first()
+        if sesion and not sesion.revocada:
+            _revocar(bd, sesion, motivo)
 
 
 def revocar_todas_las_sesiones(
     bd: Session, usuario_id: int, motivo: str, excepto_sesion_id: Optional[int] = None
 ) -> None:
-    q = bd.query(SesionUsuario).filter(
-        SesionUsuario.usuario_id == usuario_id,
-        SesionUsuario.revocada.is_(False),
-    )
-    if excepto_sesion_id is not None:
-        q = q.filter(SesionUsuario.id != excepto_sesion_id)
-    q.update(
-        {"revocada": True, "revocada_en": _ahora(), "revocada_motivo": motivo},
-        synchronize_session=False,
-    )
-    bd.commit()
+    with como_auth(bd):
+        q = bd.query(SesionUsuario).filter(
+            SesionUsuario.usuario_id == usuario_id,
+            SesionUsuario.revocada.is_(False),
+        )
+        if excepto_sesion_id is not None:
+            q = q.filter(SesionUsuario.id != excepto_sesion_id)
+        q.update(
+            {"revocada": True, "revocada_en": _ahora(), "revocada_motivo": motivo},
+            synchronize_session=False,
+        )
+        bd.commit()
 
 
-# ======================================================================
-# Cookies
-# ======================================================================
+def _atributos_cookie() -> dict:
+    return dict(
+        secure=configuracion.cookie_secure,
+        samesite=configuracion.cookie_samesite,
+    )
+
+
 def establecer_cookies_sesion(response: Response, access_token: str, refresh_token: str) -> None:
-    seguras = dict(secure=configuracion.cookie_secure, samesite=configuracion.cookie_samesite)
+    attrs = _atributos_cookie()
     max_refresh = configuracion.refresh_token_expire_days * 86400
 
-    # Access: HttpOnly, host-only, viaja a toda la API
     response.set_cookie(
-        COOKIE_ACCESS, access_token,
+        key=COOKIE_ACCESS,
+        value=access_token,
         max_age=configuracion.access_token_expire_minutes * 60,
-        httponly=True, path="/", **seguras,
+        path="/",
+        httponly=True,
+        **attrs,
     )
-    # Refresh: HttpOnly y SOLO viaja a /auth/* (menos exposición)
     response.set_cookie(
-        COOKIE_REFRESH, refresh_token,
+        key=COOKIE_REFRESH,
+        value=refresh_token,
         max_age=max_refresh,
-        httponly=True, path=configuracion.cookie_refresh_path, **seguras,
+        path=configuracion.cookie_refresh_path,
+        httponly=True,
+        **attrs,
     )
-    # CSRF: legible por JS a propósito (el front la reenvía en el header X-CSRF-Token)
     response.set_cookie(
-        COOKIE_CSRF, secrets.token_urlsafe(32),
+        key=COOKIE_CSRF,
+        value=secrets.token_urlsafe(32),
         max_age=max_refresh,
-        httponly=False, path="/", domain=configuracion.cookie_domain_csrf, **seguras,
+        path="/",
+        httponly=False,
+        domain=configuracion.cookie_domain_csrf,
+        **attrs,
     )
 
 
 def borrar_cookies_sesion(response: Response) -> None:
-    seguras = dict(secure=configuracion.cookie_secure, samesite=configuracion.cookie_samesite)
-    response.delete_cookie(COOKIE_ACCESS, path="/", httponly=True, **seguras)
-    response.delete_cookie(COOKIE_REFRESH, path=configuracion.cookie_refresh_path, httponly=True, **seguras)
-    response.delete_cookie(COOKIE_CSRF, path="/", domain=configuracion.cookie_domain_csrf, **seguras)
+    attrs = _atributos_cookie()
+
+    response.delete_cookie(
+        key=COOKIE_ACCESS,
+        path="/",
+        httponly=True,
+        **attrs,
+    )
+    response.delete_cookie(
+        key=COOKIE_REFRESH,
+        path=configuracion.cookie_refresh_path,
+        httponly=True,
+        **attrs,
+    )
+    response.delete_cookie(
+        key=COOKIE_CSRF,
+        path="/",
+        httponly=False,
+        domain=configuracion.cookie_domain_csrf,
+        **attrs,
+    )
 
 
 def iniciar_sesion(bd: Session, usuario: Usuario, request: Request, response: Response) -> SesionUsuario:
-    """Crea la sesión en BD y deja las 3 cookies en la respuesta."""
-    sesion, refresh = crear_sesion(bd, usuario, request)
-    establecer_cookies_sesion(response, crear_access_token(usuario.id, sesion.id), refresh)
+    with como_auth(bd):
+        sesion, refresh = crear_sesion(bd, usuario, request)
+        access = crear_access_token(usuario.id, sesion.id)
+        bd.commit()
+    establecer_cookies_sesion(response, access, refresh)
     return sesion
 
 
-# ======================================================================
-# CSRF (double-submit + validación de Origin). Registrar de forma global en main.py
-# ======================================================================
 METODOS_SEGUROS = {"GET", "HEAD", "OPTIONS"}
 RUTAS_CSRF_EXENTAS = (
     "/auth/login",
@@ -252,7 +269,6 @@ def verificar_csrf(request: Request) -> None:
         return
     if request.url.path.endswith(RUTAS_CSRF_EXENTAS):
         return
-    # Sin cookies de sesión no hay credenciales automáticas que proteger
     if not (request.cookies.get(COOKIE_ACCESS) or request.cookies.get(COOKIE_REFRESH)):
         return
 
@@ -267,11 +283,7 @@ def verificar_csrf(request: Request) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token CSRF inválido")
 
 
-# ======================================================================
-# Autenticación de cada petición
-# ======================================================================
 def verificar_token(request: Request) -> dict:
-    """Lee el access token de la cookie HttpOnly. Devuelve el payload validado."""
     token = request.cookies.get(COOKIE_ACCESS)
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="No autenticado")
@@ -295,6 +307,7 @@ def obtener_usuario_actual(
     payload: dict = Depends(verificar_token),
     bd: Session = Depends(obtener_bd),
 ) -> Usuario:
+    # Por defecto la sesión corre como rol_bd_auth: puede leer sesiones_usuario, usuarios y roles.
     sesion = bd.get(SesionUsuario, payload["_sesion_id"])
     if (
         not sesion
@@ -304,7 +317,7 @@ def obtener_usuario_actual(
     ):
         raise CREDENCIALES_INVALIDAS
 
-    usuario = bd.get(Usuario, payload["_usuario_id"])
+    usuario = bd.get(Usuario, payload["_usuario_id"], options=[joinedload(Usuario.rol)])
     if not usuario:
         logger.warning("Token válido sin usuario asociado: usuario_id=%s", payload["_usuario_id"])
         raise CREDENCIALES_INVALIDAS
@@ -312,14 +325,14 @@ def obtener_usuario_actual(
         logger.warning("Intento de acceso con usuario inactivo: usuario_id=%s", usuario.id)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Usuario inactivo")
 
+    # A partir de aquí la sesión pasa al rol de BD del usuario (usuario / admin / rol_app_*)
+    fijar_contexto_bd(bd, usuario.rol.codigo, usuario.id)
+
     request.state.sesion_id = sesion.id
     marcar_usuario_actual(bd, usuario.id)
     return usuario
 
 
-# ======================================================================
-# Autorización por endpoint (ESTA es la barrera real; los guards del front son solo UX)
-# ======================================================================
 def requiere_roles(*codigos_rol: str):
     def dependencia(usuario_actual: Usuario = Depends(obtener_usuario_actual)) -> Usuario:
         if not usuario_actual.tiene_rol(*codigos_rol):

@@ -34,6 +34,12 @@ httpx==0.25.2
 python-dotenv==1.0.0
 aiofiles==23.2.1
 
+# HTTP client dependencies (fijadas para evitar RequestsDependencyWarning)
+requests==2.31.0
+urllib3==1.26.18
+charset-normalizer==3.3.2
+chardet==5.2.0
+
 # NumPy - ya soporta Python 3.11 sin cambios
 numpy==1.24.3
 
@@ -88,4 +94,10 @@ gpustat==1.0.0
 google-api-python-client==2.108.0
 google-auth-httplib2==0.1.1
 google-auth-oauthlib==1.1.0
-httplib2==0.19.1
+httplib2==0.22.0
+
+slowapi==0.1.9
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1

@@ -25,6 +25,7 @@ from app.servicios.extractor_secuencias import (
     secuencia_desde_keypoints,
     normalizar_fila,
 )
+from app.utilidades.normalizar_manos import normalizar_una_mano
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ class ServicioReconocimiento:
         self.accuracy = 0.0
         self.arquitectura = ""
         self.extractor_version = None
+        self.normalizacion_una_mano = False
         self.tipos_senas = {}
         self.modelo_dir = Path('modelos_entrenados')
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -120,7 +122,15 @@ class ServicioReconocimiento:
             self.accuracy = checkpoint.get('accuracy', 0.0)
             self.arquitectura = checkpoint.get('arquitectura', 'ModeloAdaptativoSenas')
             self.extractor_version = checkpoint.get('extractor_version')
+            self.normalizacion_una_mano = bool(checkpoint.get('normalizacion_una_mano', False))
             self.tipos_senas = checkpoint.get('tipos_senas', {})
+
+            if not self.normalizacion_una_mano:
+                logger.warning(
+                    f"El modelo {Path(ruta_modelo).name} se entrenó sin normalización de una mano; "
+                    f"las manos izquierdas y derechas llegarán en un formato que no conoce. "
+                    f"Reentrénalo para obtener precisión consistente."
+                )
 
             if not self.tipos_senas:
                 self.tipos_senas = {clase: detectar_tipo_sena(clase) for clase in self.clases}
@@ -153,6 +163,10 @@ class ServicioReconocimiento:
         except Exception as e:
             logger.warning(f"Error extrayendo keypoints: {e}")
             return None
+
+    def _secuencia_desde_frame_unico(self, keypoints: np.ndarray) -> np.ndarray:
+        secuencia = np.tile(keypoints, (self.num_frames, 1)).astype(np.float32)
+        return normalizar_una_mano(secuencia)
 
     def _tensor_desde_resultado(self, resultado: ResultadoSecuencia) -> torch.Tensor:
         return torch.from_numpy(resultado.secuencia).float().unsqueeze(0).to(self.device)
@@ -188,7 +202,7 @@ class ServicioReconocimiento:
         if keypoints is None:
             keypoints = np.zeros(126, dtype=np.float32)
 
-        secuencia = np.tile(keypoints, (self.num_frames, 1)).astype(np.float32)
+        secuencia = self._secuencia_desde_frame_unico(keypoints)
         tensor = torch.from_numpy(secuencia).float().unsqueeze(0).to(self.device)
         return tensor, tipo_sena
 
@@ -291,7 +305,8 @@ class ServicioReconocimiento:
                 "es_confusion_conocida": factor_confusion > 1.0,
                 "modo": "keypoints_lstm",
                 "tta_aplicado": self._debe_usar_tta(tipo_sena) and tensor_keypoints.shape[0] == 1,
-                "temperatura": self.temperatura
+                "temperatura": self.temperatura,
+                "normalizacion_una_mano": self.normalizacion_una_mano
             }
 
             return sena_detectada, confianza, detalles
@@ -338,7 +353,7 @@ class ServicioReconocimiento:
             return self._respuesta_sin_manos()
 
         tipo_sena = detectar_tipo_sena(sena_esperada) if sena_esperada else 'DINAMICA'
-        secuencia = np.tile(keypoints, (self.num_frames, 1)).astype(np.float32)
+        secuencia = self._secuencia_desde_frame_unico(keypoints)
         tensor = torch.from_numpy(secuencia).float().unsqueeze(0).to(self.device)
         return self.predecir(tensor, tipo_sena, sena_esperada)
 
@@ -376,6 +391,7 @@ class ServicioReconocimiento:
             "dispositivo": str(self.device),
             "arquitectura": self.arquitectura,
             "extractor_version": self.extractor_version,
+            "normalizacion_una_mano": self.normalizacion_una_mano,
             "amp_enabled": self.enable_amp,
             "tta_habilitado": self.usar_tta,
             "temperatura": self.temperatura,

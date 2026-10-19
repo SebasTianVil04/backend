@@ -22,34 +22,7 @@ ROLES_SISTEMA: List[Dict[str, Union[str, List[str]]]] = [
         "codigo": "usuario",
         "nombre": "Usuario",
         "descripcion": "Usuario estándar con acceso a lecciones, exámenes y su progreso",
-        "permisos": [],
-    },
-    {
-        "codigo": "editor",
-        "nombre": "Editor",
-        "descripcion": "Gestiona contenido del sistema (categorías, lecciones, clases, tipos)",
-        "permisos": [
-            "categorias.gestionar_senas",
-            "admin.categorias.gestionar",
-            "admin.lecciones.gestionar",
-            "admin.examenes.gestionar",
-            "tipos_categoria.gestionar",
-            "clases.crear",
-            "clases.editar",
-        ],
-    },
-    {
-        "codigo": "entrenador",
-        "nombre": "Entrenador",
-        "descripcion": "Gestiona el dataset y los modelos IA",
-        "permisos": [
-            "dataset.ver",
-            "dataset.categorias.gestionar",
-            "dataset.videos.gestionar",
-            "modelos.ver",
-            "modelos.gestionar",
-            "captura.gestionar",
-        ],
+        "permisos": PERMISOS_BASE,
     },
     {
         "codigo": "admin",
@@ -58,6 +31,8 @@ ROLES_SISTEMA: List[Dict[str, Union[str, List[str]]]] = [
         "permisos": "*",
     },
 ]
+
+ROLES_LEGADOS: List[str] = ["editor", "entrenador"]
 
 
 def _resolver_permisos(db: Session, codigos: List[str]) -> List[Permiso]:
@@ -72,6 +47,17 @@ def _resolver_permisos(db: Session, codigos: List[str]) -> List[Permiso]:
         )
 
     return db.query(Permiso).filter(Permiso.codigo.in_(codigos)).all()
+
+
+def _liberar_roles_legados(db: Session) -> None:
+    legados = (
+        db.query(Rol)
+        .filter(Rol.codigo.in_(ROLES_LEGADOS), Rol.es_sistema.is_(True))
+        .all()
+    )
+    for rol in legados:
+        rol.es_sistema = False
+        logger.info("Rol '%s' pasa a ser editable (ya no es rol del sistema)", rol.codigo)
 
 
 def seed_roles(db: Session) -> None:
@@ -89,29 +75,25 @@ def seed_roles(db: Session) -> None:
                 )
                 db.add(rol)
                 db.flush()
-                logger.info("Rol '%s' creado", data["codigo"])
-            else:
-                rol.nombre = data["nombre"]
-                rol.descripcion = data["descripcion"]
+
+                if data["permisos"] == "*":
+                    rol.permisos = db.query(Permiso).all()
+                else:
+                    rol.permisos = _resolver_permisos(db, list(data["permisos"]))
+
+                logger.info("Rol '%s' creado con %d permisos", data["codigo"], len(rol.permisos))
+                continue
+
+            if not rol.es_sistema:
+                rol.es_sistema = True
 
             if data["permisos"] == "*":
                 rol.permisos = db.query(Permiso).all()
-                continue
 
-            requeridos = list(dict.fromkeys(PERMISOS_BASE + list(data["permisos"])))
-            actuales = {permiso.codigo for permiso in rol.permisos}
-            faltantes = [p for p in _resolver_permisos(db, requeridos) if p.codigo not in actuales]
-
-            if faltantes:
-                rol.permisos.extend(faltantes)
-                logger.info(
-                    "Rol '%s': permisos agregados %s",
-                    data["codigo"],
-                    sorted(p.codigo for p in faltantes),
-                )
+        _liberar_roles_legados(db)
 
         db.commit()
-        logger.info("Seed roles: %d roles sincronizados", len(ROLES_SISTEMA))
+        logger.info("Seed roles: %d roles de sistema sincronizados", len(ROLES_SISTEMA))
 
     except Exception as e:
         db.rollback()

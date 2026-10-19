@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PREFIJOS_CLAVE_INSEGURA = ("tu_clave", "cambiar", "changeme", "secret", "password")
 ALGORITMOS_PERMITIDOS = {"HS256", "HS384", "HS512"}
+BCRYPT_RONDAS_MINIMAS = 10
 
 
 class Configuracion(BaseSettings):
@@ -14,6 +15,11 @@ class Configuracion(BaseSettings):
 
     database_url: str
     direct_url: Optional[str] = None
+    rls_activo: bool = True
+
+    db_pool_size: int = 10
+    db_max_overflow: int = 10
+    db_pool_timeout: int = 30
 
     entorno: str = "dev"
     secret_key: str
@@ -23,6 +29,8 @@ class Configuracion(BaseSettings):
     refresh_token_expire_days: int = 7
     sesion_max_dias: int = 30
     reset_token_expire_minutes: int = 30
+
+    bcrypt_rounds: int = 12
 
     cookie_secure: bool = True
     cookie_samesite: str = "lax"
@@ -78,12 +86,31 @@ class Configuracion(BaseSettings):
         if "*" in self.origenes_permitidos:
             raise ValueError("ORIGENES_PERMITIDOS no puede contener '*' cuando se usan cookies de sesión")
 
+        if self.bcrypt_rounds < BCRYPT_RONDAS_MINIMAS:
+            raise ValueError(f"BCRYPT_ROUNDS no puede ser menor a {BCRYPT_RONDAS_MINIMAS}")
+
+        if self.db_pool_size < 1 or self.db_max_overflow < 0:
+            raise ValueError("DB_POOL_SIZE debe ser >= 1 y DB_MAX_OVERFLOW >= 0")
+
+        if not self.direct_url:
+            raise ValueError("DIRECT_URL (usuario signafree_owner) es obligatorio")
+
         if self.entorno == "prod":
             self.debug = False
             if not self.cookie_secure:
                 raise ValueError("COOKIE_SECURE debe ser true en producción")
+            if not self.rls_activo:
+                raise ValueError("RLS_ACTIVO debe ser true en producción")
 
         return self
+
+    @property
+    def url_app(self) -> str:
+        return self.database_url
+
+    @property
+    def url_owner(self) -> str:
+        return self.direct_url  # type: ignore[return-value]
 
     @property
     def google_cuenta_servicio_info(self) -> Optional[Dict[str, Any]]:

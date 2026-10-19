@@ -1,6 +1,7 @@
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..dependencias.permisos import requiere_permiso
@@ -21,6 +22,18 @@ router = APIRouter(prefix="/api/v1/roles", tags=["Roles"])
 ROL_PROTEGIDO = "admin"
 
 MODULOS_RESERVADOS = {"admin_usuarios", "admin_roles", "admin_menu"}
+
+
+def _sincronizar_rol_bd(db: Session, codigo: str) -> None:
+    db.execute(text("SELECT public.sincronizar_rol_bd(:codigo)"), {"codigo": codigo})
+
+
+def _sincronizar_todos_los_roles_bd(db: Session) -> None:
+    db.execute(text("SELECT public.sincronizar_todos_roles_bd()"))
+
+
+def _eliminar_rol_bd(db: Session, codigo: str) -> None:
+    db.execute(text("SELECT public.eliminar_rol_bd(:codigo)"), {"codigo": codigo})
 
 
 @router.get("", response_model=List[RolRespuesta])
@@ -47,6 +60,9 @@ async def crear_permiso(
 ):
     codigo = datos.codigo.strip().lower()
     modulo = datos.modulo.strip().lower()
+
+    if not codigo or not modulo:
+        raise HTTPException(status_code=400, detail="El código y el módulo son obligatorios")
 
     if db.query(Permiso).filter(Permiso.codigo == codigo).first():
         raise HTTPException(status_code=400, detail=f"Ya existe un permiso con código '{codigo}'")
@@ -107,6 +123,8 @@ async def eliminar_permiso(
             pass
 
     db.delete(permiso)
+    db.flush()
+    _sincronizar_todos_los_roles_bd(db)
     db.commit()
 
 
@@ -117,26 +135,33 @@ async def crear_rol(
     _=Depends(requiere_permiso("admin.roles.gestionar")),
 ):
     codigo = datos.codigo.strip().lower()
+    nombre = datos.nombre.strip()
+
+    if not codigo or not nombre:
+        raise HTTPException(status_code=400, detail="El código y el nombre son obligatorios")
 
     existente = db.query(Rol).filter(Rol.codigo == codigo).first()
     if existente:
         raise HTTPException(status_code=400, detail="Ya existe un rol con ese código")
 
     permisos = []
-    if datos.permisos_ids:
-        permisos = db.query(Permiso).filter(Permiso.id.in_(datos.permisos_ids)).all()
-        if len(permisos) != len(set(datos.permisos_ids)):
+    ids_unicos = set(datos.permisos_ids or [])
+    if ids_unicos:
+        permisos = db.query(Permiso).filter(Permiso.id.in_(ids_unicos)).all()
+        if len(permisos) != len(ids_unicos):
             raise HTTPException(status_code=400, detail="Alguno de los permisos_ids no existe")
 
     nuevo_rol = Rol(
         codigo=codigo,
-        nombre=datos.nombre.strip(),
+        nombre=nombre,
         descripcion=datos.descripcion,
         es_sistema=False,
         activo=True,
         permisos=permisos,
     )
     db.add(nuevo_rol)
+    db.flush()
+    _sincronizar_rol_bd(db, nuevo_rol.codigo)
     db.commit()
     db.refresh(nuevo_rol)
     return nuevo_rol
@@ -154,10 +179,13 @@ async def actualizar_rol(
         raise HTTPException(status_code=404, detail="Rol no encontrado")
 
     if datos.nombre is not None:
-        rol.nombre = datos.nombre.strip()
+        nombre = datos.nombre.strip()
+        if not nombre:
+            raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
+        rol.nombre = nombre
     if datos.descripcion is not None:
         rol.descripcion = datos.descripcion
-    if datos.activo is not None:
+    if datos.activo is not None and datos.activo != rol.activo:
         if rol.es_sistema:
             raise HTTPException(status_code=400, detail="No se puede desactivar un rol del sistema")
         rol.activo = datos.activo
@@ -184,11 +212,16 @@ async def asignar_permisos(
             detail="El rol 'admin' siempre tiene todos los permisos y no se puede editar aquí",
         )
 
-    permisos = db.query(Permiso).filter(Permiso.id.in_(datos.permisos_ids)).all()
-    if len(permisos) != len(set(datos.permisos_ids)):
-        raise HTTPException(status_code=400, detail="Alguno de los permisos_ids no existe")
+    ids_unicos = set(datos.permisos_ids)
+    permisos = []
+    if ids_unicos:
+        permisos = db.query(Permiso).filter(Permiso.id.in_(ids_unicos)).all()
+        if len(permisos) != len(ids_unicos):
+            raise HTTPException(status_code=400, detail="Alguno de los permisos_ids no existe")
 
     rol.permisos = permisos
+    db.flush()
+    _sincronizar_rol_bd(db, rol.codigo)
 
     db.commit()
     db.refresh(rol)
@@ -209,5 +242,8 @@ async def eliminar_rol(
     if rol.usuarios:
         raise HTTPException(status_code=400, detail="No se puede eliminar un rol que tiene usuarios asignados")
 
+    codigo = rol.codigo
     db.delete(rol)
+    db.flush()
+    _eliminar_rol_bd(db, codigo)
     db.commit()

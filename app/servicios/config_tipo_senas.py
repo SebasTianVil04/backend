@@ -68,7 +68,7 @@ SENAS_ESTATICAS = {
 }
 
 SENAS_VERIFICADAS_DINAMICAS = {
-    'doctor', 'hospital',
+    'doctor', 'hospital', 'beber',
 }
 
 SENAS_EMERGENCIA = {

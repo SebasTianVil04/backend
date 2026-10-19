@@ -28,6 +28,7 @@ router = APIRouter(prefix="/progreso", tags=["Progreso"])
 
 XP_POR_NIVEL = 100
 PRECISION_MINIMA_DEFECTO = 0.7
+ROL_RANKING = "usuario"
 
 
 def _ahora() -> datetime:
@@ -716,7 +717,7 @@ def obtener_ranking(
         .outerjoin(puntos_clases_sq, Usuario.id == puntos_clases_sq.c.usuario_id)
         .outerjoin(puntos_examenes_sq, Usuario.id == puntos_examenes_sq.c.usuario_id)
         .join(Rol, Usuario.rol_id == Rol.id)
-        .filter(and_(Usuario.activo.is_(True), Rol.codigo != "admin"))
+        .filter(and_(Usuario.activo.is_(True), Rol.codigo == ROL_RANKING))
         .order_by(puntos_totales_col.desc(), Usuario.id)
         .limit(limite)
         .all()
@@ -759,7 +760,10 @@ def obtener_ranking(
             },
         })
 
-    if not usuario_actual.es_admin and not any(u["usuario_id"] == usuario_actual.id for u in ranking_data):
+    codigo_rol_actual = db.query(Rol.codigo).filter(Rol.id == usuario_actual.rol_id).scalar()
+    participa_en_ranking = bool(usuario_actual.activo) and codigo_rol_actual == ROL_RANKING
+
+    if participa_en_ranking and not any(u["usuario_id"] == usuario_actual.id for u in ranking_data):
         totales = _calcular_puntos_usuario(db, usuario_actual.id)
 
         lecciones_completadas_usuario = (
@@ -776,7 +780,7 @@ def obtener_ranking(
             .outerjoin(puntos_examenes_sq, Usuario.id == puntos_examenes_sq.c.usuario_id)
             .filter(
                 Usuario.activo.is_(True),
-                Rol.codigo != "admin",
+                Rol.codigo == ROL_RANKING,
                 Usuario.id != usuario_actual.id,
                 puntos_totales_col > totales["puntos_totales"],
             )
@@ -802,7 +806,7 @@ def obtener_ranking(
 
     return RespuestaLista(
         exito=True,
-        mensaje=f"Ranking de {len(ranking_data)} usuarios (excluyendo administradores)",
+        mensaje=f"Ranking de {len(ranking_data)} usuarios",
         datos=ranking_data,
         total=len(ranking_data),
         pagina=1,

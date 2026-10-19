@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from ..utilidades.base_datos import Base
 from .mixins import AuditoriaMixin
 
@@ -15,7 +15,10 @@ class SenaCategoria(AuditoriaMixin, Base):
     tipo_referencia = Column(String(10), nullable=True)
     activa = Column(Boolean, default=True)
 
-    categoria_rel = relationship("Categoria", backref="senas_catalogo")
+    categoria_rel = relationship(
+        "Categoria",
+        backref=backref("senas_catalogo", cascade="all, delete-orphan"),
+    )
 
     def __repr__(self):
         return f"<SenaCategoria(id={self.id}, nombre='{self.nombre}', categoria_id={self.categoria_id})>"

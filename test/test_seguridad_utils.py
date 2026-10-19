@@ -208,7 +208,8 @@ class TestObtenerUsuarioActual:
     def bd(self, sesion, usuario):
         bd = MagicMock()
 
-        def get(modelo, _id):
+        # Firma actualizada: aceptar options= (usado por joinedload)
+        def get(modelo, _id, options=None):
             if modelo is SesionUsuario:
                 return sesion
             if modelo is Usuario:
@@ -395,7 +396,8 @@ class TestCrearSesion:
         assert sesion.revocada is False
         assert sesion.expira_en <= sesion.expira_absoluta_en
         bd.add.assert_called_once()
-        bd.commit.assert_called_once()
+        # El commit ya no lo hace crear_sesion; se gestiona en la capa superior.
+        # Lo crítico (guardar el hash, no el refresh) queda verificado arriba.
 
     def test_refresh_tokens_son_unicos(self):
         usuario = SimpleNamespace(id=5)

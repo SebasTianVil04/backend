@@ -1,4 +1,3 @@
-import numpy as np
 from collections import Counter
 from typing import Dict, Any, List
 
@@ -12,7 +11,6 @@ from app.servicios.config_tipo_senas import (
 
 
 def _severidad_confusion(sena: str) -> float:
-    """Qué tan fácil es confundir esta seña con otras: más confusiones/grupo -> mayor severidad."""
     confusiones = obtener_confusiones_comunes(sena)
     grupo = obtener_grupo_confusion(sena)
     severidad = len(confusiones)
@@ -37,14 +35,6 @@ def obtener_configuracion_sampler(clases: List[str]) -> Dict[str, Any]:
 
 
 def _multiplicador_oversampling(sena: str, config_sampler: Dict[str, Any], total_clases: int) -> float:
-    """
-    Peso de oversampling por clase.
-
-    Con pocas clases (<=6, como en un modelo que recién empieza) cada confusión
-    entre señas pesa mucho más sobre el accuracy total que en un vocabulario
-    grande, así que aquí se refuerza con más fuerza a las señas confusas
-    (p. ej. B, que se confunde con D/P/1/4/R).
-    """
     severidad = config_sampler['severidades'].get(sena, 0)
     severidad_maxima = config_sampler['severidad_maxima']
 
@@ -53,7 +43,7 @@ def _multiplicador_oversampling(sena: str, config_sampler: Dict[str, Any], total
     elif sena.isdigit():
         base = 3.0
     elif len(sena) == 1 and sena.isalpha():
-        base = 1.5  # antes 1.3: se sube para reforzar letras confusas con pocas clases
+        base = 1.5
     else:
         base = 1.1
 
@@ -91,9 +81,6 @@ def crear_sampler_balanceado(train_labels: List[int], train_senas: List[str], cl
 
 
 def obtener_parametros_entrenamiento_optimizados(clases: List[str]) -> Dict[str, Any]:
-    """
-    Hiperparámetros afinados para datasets pequeños (~50 videos/clase, pocas clases).
-    """
     numeros = [c for c in clases if c.isdigit()]
     letras = [c for c in clases if len(c) == 1 and c.isalpha()]
     palabras = [c for c in clases if c not in numeros and c not in letras]
@@ -130,9 +117,6 @@ def obtener_parametros_entrenamiento_optimizados(clases: List[str]) -> Dict[str,
         parametros['patience'] = min(parametros['patience'] + 10, 70)
         parametros['focal_gamma'] = 2.2
 
-    # Con pocas clases el modelo converge rápido pero también sobreajusta rápido:
-    # un poco más de label smoothing y un LR algo más bajo ayudan a que generalice
-    # en vez de memorizar los 50 videos por clase.
     if total <= 6:
         parametros['label_smoothing'] = max(parametros['label_smoothing'], 0.03)
         parametros['learning_rate'] = min(parametros['learning_rate'], 0.0006)

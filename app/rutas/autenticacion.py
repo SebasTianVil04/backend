@@ -1,9 +1,8 @@
-# app/routers/auth.py
 import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload, undefer
 
 from ..utilidades.base_datos import obtener_bd
 from ..utilidades.seguridad import (
@@ -61,7 +60,6 @@ def _construir_usuario_respuesta(usuario: Usuario) -> dict:
 
 
 def _error_interno(contexto: str, exc: Exception) -> HTTPException:
-    # El detalle real va al log, NUNCA al cliente
     logger.exception("%s: %s", contexto, exc)
     return HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -74,11 +72,8 @@ def _enmascarar_email(email: str) -> str:
     return f"{local[:1]}***@{dominio}" if dominio else "***"
 
 
-# ----------------------------------------------------------------------
-# Registro / Login
-# ----------------------------------------------------------------------
 @router.post("/registro", response_model=SesionRespuesta)
-async def registrar_usuario(
+def registrar_usuario(
     datos_usuario: UsuarioRegistro,
     request: Request,
     response: Response,
@@ -105,7 +100,7 @@ async def registrar_usuario(
             nombre_usuario=datos_usuario.nombre_usuario,
             email=email_normalizado,
             password_hash=obtener_hash_password(datos_usuario.password),
-            rol_id=rol_por_defecto.id,   # el rol NUNCA viene del cliente
+            rol_id=rol_por_defecto.id,
             activo=True,
             verificado=True,
         )
@@ -130,17 +125,23 @@ async def registrar_usuario(
 
 
 @router.post("/login", response_model=SesionRespuesta)
-async def login_usuario(
+def login_usuario(
     credenciales: UsuarioLogin,
     request: Request,
     response: Response,
     bd: Session = Depends(obtener_bd),
 ):
     email_normalizado = credenciales.email.lower().strip()
-    usuario_db = bd.query(Usuario).filter(Usuario.email == email_normalizado).first()
+    # undefer: aquí sí necesitamos password_hash para verificar la contraseña.
+    usuario_db = (
+        bd.query(Usuario)
+        .options(joinedload(Usuario.rol), undefer(Usuario.password_hash))
+        .filter(Usuario.email == email_normalizado)
+        .first()
+    )
 
     if not usuario_db:
-        verificar_password_falso(credenciales.password)   # mismo tiempo de respuesta
+        verificar_password_falso(credenciales.password)
         raise ERROR_LOGIN
 
     if not verificar_password(credenciales.password, usuario_db.password_hash):
@@ -153,90 +154,89 @@ async def login_usuario(
     return SesionRespuesta(usuario=UsuarioRespuesta(**_construir_usuario_respuesta(usuario_db)))
 
 
-# ----------------------------------------------------------------------
-# Rotación / cierre de sesión
-# ----------------------------------------------------------------------
-@router.post("/refresh", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
-async def refrescar_sesion(request: Request, bd: Session = Depends(obtener_bd)):
-    """Rota el refresh token y emite un access token nuevo. Todo por cookies."""
+@router.post("/refresh", status_code=status.HTTP_200_OK, response_class=JSONResponse)
+def refrescar_sesion(request: Request, bd: Session = Depends(obtener_bd)):
     refresh = request.cookies.get(COOKIE_REFRESH)
     if not refresh:
-        return JSONResponse(status_code=401, content={"detail": "No autenticado"})
+        r = JSONResponse(status_code=401, content={"detail": "No autenticado"})
+        borrar_cookies_sesion(r)
+        return r
 
     try:
         sesion, nuevo_refresh = rotar_sesion(bd, refresh)
     except HTTPException as exc:
-        # Refresh inválido/reutilizado/expirado: limpiar cookies del navegador
         r = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
         borrar_cookies_sesion(r)
         return r
 
-    r = Response(status_code=status.HTTP_204_NO_CONTENT)
+    r = JSONResponse(status_code=status.HTTP_200_OK, content={"ok": True})
     establecer_cookies_sesion(r, crear_access_token(sesion.usuario_id, sesion.id), nuevo_refresh)
     return r
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
-async def logout_usuario(request: Request, bd: Session = Depends(obtener_bd)):
-    """Revoca la sesión en BD (el access token deja de valer al instante) y borra cookies.
-    No exige access token vigente: se puede cerrar sesión aunque haya expirado."""
+@router.post("/logout", status_code=status.HTTP_200_OK, response_class=JSONResponse)
+def logout_usuario(request: Request, bd: Session = Depends(obtener_bd)):
     refresh = request.cookies.get(COOKIE_REFRESH)
     if refresh:
         revocar_sesion_por_refresh(bd, refresh, "logout")
-    r = Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    r = JSONResponse(status_code=status.HTTP_200_OK, content={"ok": True})
     borrar_cookies_sesion(r)
     return r
 
 
-@router.post("/logout-todas", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
-async def logout_todas_las_sesiones(
+@router.post("/logout-todas", status_code=status.HTTP_200_OK, response_class=JSONResponse)
+def logout_todas_las_sesiones(
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     bd: Session = Depends(obtener_bd),
 ):
-    """Cierra la sesión en TODOS los dispositivos (útil si sospecha de robo)."""
     revocar_todas_las_sesiones(bd, usuario_actual.id, "logout_todas")
-    r = Response(status_code=status.HTTP_204_NO_CONTENT)
+    r = JSONResponse(status_code=status.HTTP_200_OK, content={"ok": True})
     borrar_cookies_sesion(r)
     return r
 
 
-# ----------------------------------------------------------------------
-# Contraseñas
-# ----------------------------------------------------------------------
 @router.put("/cambiar-password")
-async def cambiar_password(
+def cambiar_password(
     datos: CambiarPasswordRequest,
     request: Request,
     response: Response,
     usuario_actual: Usuario = Depends(obtener_usuario_actual),
     bd: Session = Depends(obtener_bd),
 ):
-    if not verificar_password(datos.password_actual, usuario_actual.password_hash):
+    # Recargamos el usuario con undefer para tener acceso a password_hash.
+    # usuario_actual viene de obtener_usuario_actual(), que ya no carga ese campo.
+    usuario_db = (
+        bd.query(Usuario)
+        .options(undefer(Usuario.password_hash))
+        .filter(Usuario.id == usuario_actual.id)
+        .first()
+    )
+
+    if not usuario_db or not verificar_password(datos.password_actual, usuario_db.password_hash):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La contraseña actual es incorrecta")
 
-    if verificar_password(datos.password_nueva, usuario_actual.password_hash):
+    if verificar_password(datos.password_nueva, usuario_db.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="La nueva contraseña debe ser diferente a la contraseña actual",
         )
 
     try:
-        usuario_actual.password_hash = obtener_hash_password(datos.password_nueva)
+        usuario_db.password_hash = obtener_hash_password(datos.password_nueva)
         bd.commit()
     except Exception as e:
         bd.rollback()
         raise _error_interno("Error al cambiar contraseña", e)
 
-    # Invalida TODAS las sesiones (si alguien tenía la sesión robada, queda fuera)
-    # y abre una nueva solo para este dispositivo.
-    revocar_todas_las_sesiones(bd, usuario_actual.id, "cambio_password")
-    iniciar_sesion(bd, usuario_actual, request, response)
+    revocar_todas_las_sesiones(bd, usuario_db.id, "cambio_password")
+    iniciar_sesion(bd, usuario_db, request, response)
 
-    return {"mensaje": "Contraseña actualizada exitosamente", "usuario": usuario_actual.nombre_usuario}
+    return {"mensaje": "Contraseña actualizada exitosamente", "usuario": usuario_db.nombre_usuario}
 
 
 @router.post("/solicitar-recuperacion", response_model=RespuestaRecuperacion)
-async def solicitar_recuperacion_password(
+def solicitar_recuperacion_password(
     datos: SolicitudRecuperacion,
     background_tasks: BackgroundTasks,
     bd: Session = Depends(obtener_bd),
@@ -244,7 +244,6 @@ async def solicitar_recuperacion_password(
     email_normalizado = datos.email.lower().strip()
     usuario_db = bd.query(Usuario).filter(Usuario.email == email_normalizado).first()
 
-    # Misma respuesta exista o no el correo, o esté o no activo (evita enumeración)
     if not usuario_db or not usuario_db.activo:
         return RespuestaRecuperacion(mensaje=MENSAJE_RECUPERACION, email=datos.email)
 
@@ -273,7 +272,7 @@ async def solicitar_recuperacion_password(
 
 
 @router.post("/confirmar-recuperacion", response_model=RespuestaRecuperacion)
-async def confirmar_recuperacion_password(
+def confirmar_recuperacion_password(
     datos: ConfirmarRecuperacion,
     background_tasks: BackgroundTasks,
     bd: Session = Depends(obtener_bd),
@@ -293,7 +292,13 @@ async def confirmar_recuperacion_password(
                 detail="El token ha expirado. Solicita uno nuevo",
             )
 
-        usuario_db = bd.query(Usuario).filter(Usuario.email == token_recuperacion.usuario_email).first()
+        # undefer: necesitamos password_hash para comparar con la nueva contraseña.
+        usuario_db = (
+            bd.query(Usuario)
+            .options(undefer(Usuario.password_hash))
+            .filter(Usuario.email == token_recuperacion.usuario_email)
+            .first()
+        )
         if not usuario_db:
             token_recuperacion.usado = True
             bd.commit()
@@ -309,7 +314,6 @@ async def confirmar_recuperacion_password(
         token_recuperacion.usado = True
         bd.commit()
 
-        # Tras recuperar la cuenta, se cierran todas las sesiones existentes
         revocar_todas_las_sesiones(bd, usuario_db.id, "recuperacion_password")
 
         background_tasks.add_task(
@@ -330,7 +334,7 @@ async def confirmar_recuperacion_password(
 
 
 @router.get("/verificar-token-recuperacion/{token}")
-async def verificar_token_recuperacion(token: str, bd: Session = Depends(obtener_bd)):
+def verificar_token_recuperacion(token: str, bd: Session = Depends(obtener_bd)):
     token_recuperacion = bd.query(TokenRecuperacion).filter(
         TokenRecuperacion.token == token,
         TokenRecuperacion.usado == False,  # noqa: E712
@@ -350,4 +354,3 @@ async def verificar_token_recuperacion(token: str, bd: Session = Depends(obtener
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Token inválido o ya usado")
 
     return {"valido": True, "email": _enmascarar_email(usuario_db.email), "mensaje": "Token válido"}
-
