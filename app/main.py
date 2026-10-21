@@ -52,6 +52,9 @@ REGISTRO_ROUTERS = [
     ("roles", ""),
     ("menu", "/api/v1"),
     ("menu_admin", ""),
+    ("contacto", "/api/v1"),
+    ("tickets", "/api/v1"),
+    ("tickets_admin", "/api/v1"),
     ("archivos", "/api/v1"),
 ]
 

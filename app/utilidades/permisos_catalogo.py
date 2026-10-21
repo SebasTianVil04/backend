@@ -18,11 +18,15 @@ CATALOGO_PERMISOS: List[Tuple[str, str, str]] = [
     ("admin.categorias.gestionar", "admin_categorias", "Acceder al panel admin de gestión de categorías"),
     ("admin.lecciones.gestionar", "admin_lecciones", "Acceder al panel admin de gestión de lecciones"),
     ("admin.examenes.gestionar", "admin_examenes", "Crear, editar y eliminar exámenes y preguntas"),
+    ("admin.tickets.gestionar", "admin_tickets", "Listar, asignar, responder y cambiar el estado de los tickets de soporte"),
 
     ("lecciones.ver", "lecciones", "Ver lecciones y estudiar"),
     ("practicas.registrar", "lecciones", "Practicar y registrar intentos en las clases"),
     ("examenes.ver", "examenes", "Ver y presentar exámenes"),
     ("progreso.ver", "progreso", "Ver el progreso propio"),
+
+    ("tickets.crear", "tickets", "Crear tickets de soporte y comentar los propios"),
+    ("tickets.ver_propios", "tickets", "Ver los tickets de soporte propios"),
 
     ("categorias.ver", "categorias", "Ver categorías"),
     ("categorias.gestionar_senas", "categorias", "Gestionar señas de una categoría"),

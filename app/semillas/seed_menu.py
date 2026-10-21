@@ -13,6 +13,7 @@ ITEMS: List[Dict] = [
     {"label": "Lecciones", "icon": "📚", "ruta": "/lecciones", "permiso": "lecciones.ver", "orden": 2},
     {"label": "Autoevaluación", "icon": "📝", "ruta": "/examenes", "permiso": "examenes.ver", "orden": 3},
     {"label": "Mi Progreso", "icon": "📊", "ruta": "/progreso", "permiso": "progreso.ver", "orden": 4},
+    {"label": "Soporte", "icon": "🛟", "ruta": "/soporte", "permiso": "tickets.ver_propios", "orden": 5},
 
     {"label": "Panel", "icon": "📊", "ruta": "/admin/panel", "permiso": "admin.dashboard.ver", "orden": 10},
     {
@@ -28,6 +29,7 @@ ITEMS: List[Dict] = [
     {"label": "Usuarios", "icon": "👥", "ruta": "/admin/usuarios", "permiso": "admin.usuarios.listar", "orden": 30},
     {"label": "Roles y Permisos", "icon": "🔐", "ruta": "/admin/roles", "permiso": "admin.roles.gestionar", "orden": 31},
     {"label": "Menú", "icon": "🧩", "ruta": "/admin/menu", "permiso": "admin.menu.gestionar", "orden": 32},
+    {"label": "Tickets", "icon": "🎫", "ruta": "/admin/tickets", "permiso": "admin.tickets.gestionar", "orden": 33},
     {"label": "Capturar Datos", "icon": "📸", "ruta": "/admin/captura-unificada", "permiso": "captura.gestionar", "orden": 40},
 
     {

@@ -2,9 +2,10 @@ import os
 import time
 import logging
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np
+import torch
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -24,6 +25,7 @@ from ..servicios.gestor_reconocimiento import (
     cerrar_mediapipe_hands,
     info_cache,
 )
+from ..servicios.config_tipo_senas import detectar_tipo_sena
 from ..servicios.extractor_secuencias import normalizar_fila
 
 router = APIRouter(prefix="/reconocimiento-video", tags=["Reconocimiento Video"])
@@ -44,7 +46,8 @@ class SolicitudVideoSecuencia(BaseModel):
     configuracion: Dict[str, Any] = {}
     sena_esperada: Optional[str] = None
     categoria_id: Optional[int] = None
-    modelo_id: Optional[int] = None  # Si viene, se usa solo ese modelo (debe estar activo)
+    modelo_id: Optional[int] = None
+    tipo_sena: Optional[str] = None
 
 
 CATEGORIAS_CALIDAD = (
@@ -56,6 +59,17 @@ CATEGORIAS_CALIDAD = (
 
 MAX_FRAMES_ENTRADA = 120
 MIN_FRAMES_CON_MANO = 4
+TIPOS_SENA = ("DINAMICA", "ESTATICA")
+
+# --- Parámetros del modo automático (provisionales: calibrar con las líneas de diagnóstico) ---
+# El movimiento se mide como desplazamiento medio por paso entre frames, en "tamaños de mano",
+# dentro de la ventana MÁS QUIETA de la captura (así entrar y salir con la mano no cuenta).
+VENTANA_QUIETA = 0.4             # fracción de la captura que forma la ventana
+UMBRAL_QUIETA_DINAMICA = 0.08    # >= esto en la ventana más quieta => movimiento sostenido
+UMBRAL_QUIETA_ESTATICA = 0.04    # <= esto => la mano se quedó quieta en algún tramo
+CONF_SATURADA = 0.90             # por encima, el softmax ya no distingue entre cabezas
+DIF_CONF_DECISIVA = 0.15         # si una cabeza gana por más que esto, manda la confianza
+CONFIANZA_MINIMA_PREFERIDO = 0.35
 
 
 def _landmarks_a_fila(landmarks: Any) -> Optional[np.ndarray]:
@@ -94,6 +108,64 @@ def _landmarks_a_fila(landmarks: Any) -> Optional[np.ndarray]:
         return fila
 
 
+def _xy(punto) -> Tuple[float, float]:
+    if isinstance(punto, dict):
+        return float(punto.get('x', 0.0) or 0.0), float(punto.get('y', 0.0) or 0.0)
+    return float(getattr(punto, 'x', 0.0) or 0.0), float(getattr(punto, 'y', 0.0) or 0.0)
+
+
+def _minimo_ventana(pasos: np.ndarray, fraccion: float) -> float:
+    # Promedio de movimiento de la ventana contigua más quieta.
+    n = len(pasos)
+    if n == 0:
+        return 0.0
+    w = min(n, max(2, int(round(n * fraccion))))
+    medias = np.convolve(pasos, np.ones(w, dtype=np.float32) / w, mode="valid")
+    return float(medias.min())
+
+
+def _movimiento_manos(frames: List[FrameData]) -> Dict[str, float]:
+    # Devuelve el movimiento de las manos en "tamaños de mano" por paso entre frames:
+    #  - quieta: movimiento medio en la ventana más quieta (muñeca + dedos). Es el valor de decisión.
+    #  - forma_quieta: lo mismo pero solo la forma de la mano (relativa a la muñeca).
+    #  - medio / pico: movimiento medio y máximo de toda la captura (informativos).
+    # Con varias manos se toma la que más se mueve.
+    series: List[List[np.ndarray]] = [[], []]
+
+    for frame in frames:
+        manos = frame.landmarks
+        if not manos or not isinstance(manos, (list, tuple)):
+            continue
+        for slot, mano in enumerate(manos[:2]):
+            if not isinstance(mano, (list, tuple)) or len(mano) < 21:
+                continue
+            series[slot].append(np.asarray([_xy(p) for p in mano[:21]], dtype=np.float32))
+
+    resultado = {"quieta": 0.0, "forma_quieta": 0.0, "medio": 0.0, "pico": 0.0, "frames_mano": 0}
+
+    for serie in series:
+        if len(serie) < MIN_FRAMES_CON_MANO:
+            continue
+        arr = np.stack(serie)                                        # (n, 21, 2)
+        extension = arr.max(axis=1) - arr.min(axis=1)                # (n, 2)
+        escala = float(np.median(np.linalg.norm(extension, axis=1)))  # tamaño típico de la mano
+        if escala < 1e-4:
+            continue
+        arr = arr / escala
+        rel = arr - arr[:, :1, :]
+
+        pasos = np.linalg.norm(np.diff(arr, axis=0), axis=2).mean(axis=1)
+        pasos_forma = np.linalg.norm(np.diff(rel, axis=0), axis=2).mean(axis=1)
+
+        resultado["quieta"] = max(resultado["quieta"], _minimo_ventana(pasos, VENTANA_QUIETA))
+        resultado["forma_quieta"] = max(resultado["forma_quieta"], _minimo_ventana(pasos_forma, VENTANA_QUIETA))
+        resultado["medio"] = max(resultado["medio"], float(pasos.mean()))
+        resultado["pico"] = max(resultado["pico"], float(pasos.max()))
+        resultado["frames_mano"] = max(resultado["frames_mano"], len(serie))
+
+    return resultado
+
+
 def _evaluar_calidad(confianza: float, sena_detectada: str) -> Dict[str, str]:
     for umbral, calidad, etiqueta in CATEGORIAS_CALIDAD:
         if confianza >= umbral:
@@ -121,12 +193,159 @@ def _iso(valor) -> Optional[str]:
     return valor.isoformat() if valor else None
 
 
+def _tipo_por_nombre(sena: str, reconocedor, tipo_defecto: str) -> str:
+    # Prioridad: el tipo con el que se entrenó la clase; la heurística por nombre solo es respaldo.
+    tipo = None
+    try:
+        tipo = (getattr(reconocedor, "tipos_senas", None) or {}).get(sena)
+    except Exception:
+        tipo = None
+    if not tipo:
+        try:
+            tipo = detectar_tipo_sena(sena)
+        except Exception:
+            tipo = None
+    tipo_final = str(tipo or tipo_defecto).upper()
+    return "DINAMICA" if tipo_final == "EMERGENCIA" else tipo_final
+
+
+def _logits_cabeza(reconocedor, tensor, tipo: str) -> Tuple[Optional[float], Optional[float]]:
+    try:
+        with torch.no_grad():
+            salida = reconocedor._ejecutar_forward(tensor, [tipo])
+        valores = np.sort(salida[0].float().cpu().numpy())[::-1]
+        margen = float(valores[0] - valores[1]) if len(valores) > 1 else 0.0
+        return float(valores[0]), margen
+    except Exception:
+        return None, None
+
+
+def _predecir_probando_ambos_tipos(
+    reconocedor,
+    tensor,
+    movimiento: Optional[Dict[str, float]] = None,
+) -> Tuple[str, float, Dict[str, Any], str]:
+    movimiento = movimiento or {}
+    candidatos = []
+
+    for tipo in TIPOS_SENA:
+        sena, conf, detalles = reconocedor.predecir(tensor, tipo, None)
+        if not sena or sena == "desconocido":
+            continue
+
+        tipo_nombre = _tipo_por_nombre(sena, reconocedor, tipo)
+        logit_max, margen_logit = _logits_cabeza(reconocedor, tensor, tipo)
+        candidatos.append({
+            "coherente": tipo_nombre == tipo,
+            "confianza": conf,
+            "tipo": tipo,
+            "sena": sena,
+            "tipo_modelo": reconocedor.tipos_senas.get(sena),
+            "logit_max": logit_max,
+            "margen_logit": margen_logit,
+            "score": logit_max if logit_max is not None else 0.0,
+            "detalles": detalles,
+        })
+
+    if not candidatos:
+        return "desconocido", 0.0, {"error": "No se pudo reconocer la seña", "alternativas": []}, "DINAMICA"
+
+    # 1) Qué tipo sugiere el movimiento (en la ventana más quieta de la captura)
+    quieta = float(movimiento.get("quieta", 0.0))
+    if quieta >= UMBRAL_QUIETA_DINAMICA:
+        tipo_favorecido = "DINAMICA"
+    elif quieta <= UMBRAL_QUIETA_ESTATICA:
+        tipo_favorecido = "ESTATICA"
+    else:
+        tipo_favorecido = None
+
+    elegido = None
+    motivo = ""
+
+    # 2) Si el movimiento es claro, decide el movimiento (las cabezas saturan al 100% y no sirven)
+    if tipo_favorecido:
+        del_tipo = [
+            c for c in candidatos
+            if c["tipo"] == tipo_favorecido and c["confianza"] >= CONFIANZA_MINIMA_PREFERIDO
+        ]
+        if del_tipo:
+            elegido = max(del_tipo, key=lambda c: c["confianza"])
+            motivo = "movimiento"
+
+    # 3) Si es ambiguo: confianza si hay diferencia clara; si no, logit máximo
+    if elegido is None:
+        coherentes = [c for c in candidatos if c["coherente"]]
+        pool = coherentes or candidatos
+        ordenados = sorted(pool, key=lambda c: c["confianza"], reverse=True)
+        elegido = ordenados[0]
+        motivo = "confianza"
+        if len(ordenados) > 1:
+            segundo = ordenados[1]
+            ambos_saturados = (
+                elegido["confianza"] >= CONF_SATURADA and segundo["confianza"] >= CONF_SATURADA
+            )
+            if ambos_saturados or (elegido["confianza"] - segundo["confianza"]) < DIF_CONF_DECISIVA:
+                elegido = max(pool, key=lambda c: c["score"])
+                motivo = "logit"
+
+    detalles = elegido["detalles"]
+
+    alternativas = list(detalles.get("alternativas", []))
+    for otro in candidatos:
+        if otro is elegido or otro["sena"] == elegido["sena"]:
+            continue
+        alternativas = [a for a in alternativas if a.get("sena") != otro["sena"]]
+        alternativas.append({
+            "sena": otro["sena"],
+            "confianza": otro["confianza"],
+            "tipo": otro["tipo"],
+        })
+    detalles["alternativas"] = alternativas
+
+    detalles["diagnostico_auto"] = {
+        "movimiento_quieto": round(quieta, 4),
+        "forma_quieta": round(float(movimiento.get("forma_quieta", 0.0)), 4),
+        "movimiento_medio": round(float(movimiento.get("medio", 0.0)), 4),
+        "movimiento_pico": round(float(movimiento.get("pico", 0.0)), 4),
+        "umbral_dinamica": UMBRAL_QUIETA_DINAMICA,
+        "umbral_estatica": UMBRAL_QUIETA_ESTATICA,
+        "tipo_favorecido": tipo_favorecido,
+        "motivo": motivo,
+        "tipo_elegido": elegido["tipo"],
+        "candidatos": [
+            {
+                "tipo": c["tipo"],
+                "sena": c["sena"],
+                "confianza": round(float(c["confianza"]), 3),
+                "coherente": c["coherente"],
+                "tipo_modelo": c["tipo_modelo"],
+                "logit_max": round(c["logit_max"], 2) if c["logit_max"] is not None else None,
+                "margen_logit": round(c["margen_logit"], 2) if c["margen_logit"] is not None else None,
+            }
+            for c in candidatos
+        ],
+    }
+    detalles["reevaluado"] = True
+    detalles["tipo_inicial"] = "AUTO"
+
+    logger.info(
+        f"[AUTO-TIPO] quieta={quieta:.4f} (estatica<={UMBRAL_QUIETA_ESTATICA}, dinamica>={UMBRAL_QUIETA_DINAMICA}) "
+        f"medio={movimiento.get('medio', 0.0):.4f} forma_quieta={movimiento.get('forma_quieta', 0.0):.4f} "
+        f"favorecido={tipo_favorecido} motivo={motivo} | " + " | ".join(
+            f"{c['tipo']}->{c['sena']} ({c['confianza'] * 100:.1f}%, coherente={c['coherente']}, "
+            f"tipo_modelo={c['tipo_modelo']}, logit={c['logit_max']})"
+            for c in candidatos
+        ) + f" => {elegido['tipo']}:{elegido['sena']}"
+    )
+
+    return elegido["sena"], elegido["confianza"], detalles, elegido["tipo"]
+
+
 @router.get("/modelos-activos")
 def listar_modelos_activos(
     db: Session = Depends(obtener_bd),
     usuario_actual: Usuario = Depends(obtener_usuario_actual)
 ):
-    """Modelos activos (con archivo presente en disco) que el usuario puede elegir para traducir."""
     try:
         activos = db.query(ModeloIA).filter(ModeloIA.activo == True).all()
 
@@ -233,15 +452,33 @@ def reconocer_secuencia_video(
             if estado > 0
         ]
 
-        tipo_sena_inicial = determinar_tipo_sena(
-            db, solicitud.sena_esperada, solicitud.categoria_id, reconocedor,
-            keypoints_secuencia=keypoints_secuencia
-        )
-
         tensor = reconocedor._tensor_desde_resultado(resultado_secuencia)
-        sena_detectada, confianza, detalles = reconocedor.predecir(
-            tensor, tipo_sena_inicial, solicitud.sena_esperada
-        )
+
+        tipo_forzado = (solicitud.tipo_sena or "").strip().upper()
+
+        if tipo_forzado in TIPOS_SENA:
+            tipo_sena_inicial = tipo_forzado
+            sena_detectada, confianza, detalles = reconocedor.predecir(
+                tensor, tipo_sena_inicial, solicitud.sena_esperada
+            )
+            tipo_sena = detalles.get("tipo_sena", tipo_sena_inicial)
+
+        elif solicitud.sena_esperada:
+            tipo_sena_inicial = determinar_tipo_sena(
+                db, solicitud.sena_esperada, solicitud.categoria_id, reconocedor,
+                keypoints_secuencia=keypoints_secuencia
+            )
+            sena_detectada, confianza, detalles = reconocedor.predecir(
+                tensor, tipo_sena_inicial, solicitud.sena_esperada
+            )
+            tipo_sena = detalles.get("tipo_sena", tipo_sena_inicial)
+
+        else:
+            movimiento = _movimiento_manos(solicitud.frames)
+            sena_detectada, confianza, detalles, tipo_sena = _predecir_probando_ambos_tipos(
+                reconocedor, tensor, movimiento
+            )
+            tipo_sena_inicial = "AUTO"
 
         if not sena_detectada or sena_detectada == "desconocido":
             return _respuesta_fallida(
@@ -249,7 +486,6 @@ def reconocer_secuencia_video(
                 solicitud.categoria_id, frames_exitosos
             )
 
-        tipo_sena = detalles.get("tipo_sena", tipo_sena_inicial)
         confianza_validada = max(0.0, min(1.0, confianza))
         processing_time = time.time() - start_time
         evaluacion = _evaluar_calidad(confianza_validada, sena_detectada)
@@ -273,6 +509,7 @@ def reconocer_secuencia_video(
             "modo": tipo_sena,
             "modo_inicial": tipo_sena_inicial,
             "reevaluado": detalles.get("reevaluado", False),
+            "diagnostico_auto": detalles.get("diagnostico_auto"),
             "num_frames_procesados": frames_exitosos,
             "num_frames_usados_prediccion": detalles.get("num_frames_usado", reconocedor.num_frames),
             "tiempo_procesamiento_ms": round(processing_time * 1000, 2),
@@ -285,7 +522,7 @@ def reconocer_secuencia_video(
                 "modelo_nombre": reconocedor.arquitectura,
                 "modo_usado": tipo_sena,
                 "es_ensemble": es_ensemble,
-                "ensemble": detalles.get("modelos_ensemble"),  # None si es un solo modelo
+                "ensemble": detalles.get("modelos_ensemble"),
                 "seleccion_manual": bool(solicitud.modelo_id),
             },
             "timestamp": datetime.now().isoformat()
@@ -402,7 +639,6 @@ def limpiar_cache_modelo(
         mensaje = limpiar_cache()
         cerrar_mediapipe_hands()
 
-        import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()

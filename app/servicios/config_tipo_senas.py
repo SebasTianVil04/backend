@@ -1,12 +1,21 @@
 import logging
 import re
 import json
+import unicodedata
 import cv2
 import numpy as np
 from typing import Dict, Any, List, Optional, Set, Tuple
 from datetime import datetime
 
+
 def redimensionar_manteniendo_aspecto(frame: np.ndarray, tamano: Tuple[int, int] = (224, 224)) -> np.ndarray:
+    if frame is None or frame.size == 0:
+        raise ValueError("frame vacío")
+    if frame.ndim == 2:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+    elif frame.shape[2] == 4:
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
     h, w = frame.shape[:2]
     ancho_destino, alto_destino = tamano
     escala = min(ancho_destino / w, alto_destino / h)
@@ -18,7 +27,27 @@ def redimensionar_manteniendo_aspecto(frame: np.ndarray, tamano: Tuple[int, int]
     canvas[y_offset:y_offset + nuevo_h, x_offset:x_offset + nuevo_w] = frame_redim
     return canvas
 
+
 logger = logging.getLogger(__name__)
+
+
+def _quitar_tildes(texto: str) -> str:
+    texto = texto.replace('ñ', '\x00').replace('Ñ', '\x01')
+    texto = ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn')
+    return texto.replace('\x00', 'ñ').replace('\x01', 'Ñ')
+
+
+def normalizar_nombre(nombre: Optional[str]) -> str:
+    if not nombre:
+        return ''
+    n = _quitar_tildes(str(nombre).lower())
+    n = re.sub(r'[_\-]+', ' ', n)
+    return re.sub(r'\s+', ' ', n).strip()
+
+
+def _clave(nombre: Optional[str]) -> str:
+    return normalizar_nombre(nombre).upper()
+
 
 CONFIG_SENAS = {
     'ESTATICA': {
@@ -58,18 +87,20 @@ CONFIG_SENAS = {
     }
 }
 
+LETRAS_CON_MOVIMIENTO = {'j', 'z', 'ñ'}
+
 SENAS_ESTATICAS = {
-    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
-    'n', 'ñ', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'k', 'l', 'm',
+    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y',
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-    'hola', 'gracias', 'si', 'no', 'ayuda', 'casa', 'agua', 'comida', 'baño',
-    'familia', 'amigo', 'trabajo', 'escuela', 'dinero',
-    'por favor', 'de nada', 'lo siento', 'bien', 'mal', 'adios'
 }
 
 SENAS_VERIFICADAS_DINAMICAS = {
-    'doctor', 'hospital', 'beber',
-}
+    'doctor', 'hospital', 'beber', 'dentista', 'abogado', 'ayuda',
+    'hola', 'gracias', 'si', 'no', 'casa', 'agua', 'comida', 'baño',
+    'familia', 'amigo', 'trabajo', 'escuela', 'dinero',
+    'por favor', 'de nada', 'lo siento', 'bien', 'mal', 'adios',
+} | LETRAS_CON_MOVIMIENTO
 
 SENAS_EMERGENCIA = {
     'sos', 'emergencia', 'socorro', 'auxilio', 'peligro', 'fuego',
@@ -142,6 +173,13 @@ CONFUSIONES_COMUNES = {
     'COMIDA': ['AGUA'],
     'DOCTOR': ['HOSPITAL', 'AMBULANCIA', 'ACCIDENTE'],
     'HOSPITAL': ['DOCTOR', 'CASA', 'AMBULANCIA'],
+    'BEBER': ['AGUA', 'COMIDA'],
+    'DENTISTA': ['DOCTOR', 'HOSPITAL'],
+    'ABOGADO': ['DOCTOR', 'POLICIA'],
+    'BAÑO': ['AGUA', 'CASA'],
+    'TRABAJO': ['ESCUELA', 'DINERO'],
+    'ESCUELA': ['TRABAJO', 'CASA'],
+    'DINERO': ['TRABAJO', 'COMIDA'],
     'SOS': ['AYUDA', 'SOCORRO', 'AUXILIO', 'EMERGENCIA'],
     'EMERGENCIA': ['SOS', 'PELIGRO', 'AYUDA', 'ACCIDENTE'],
     'SOCORRO': ['SOS', 'AYUDA', 'AUXILIO'],
@@ -159,19 +197,23 @@ CONFUSIONES_COMUNES = {
     'LLAMEN A ALGUIEN': ['AYUDA', 'SOS'],
 }
 
+
 def _simetrizar_confusiones(dic: Dict[str, List[str]]) -> Dict[str, List[str]]:
     for clave, confusiones in list(dic.items()):
-        for otra in confusiones:
+        for otra in list(confusiones):
             if otra not in dic:
                 dic[otra] = []
             if clave not in dic[otra]:
                 dic[otra].append(clave)
     return dic
 
+
 CONFUSIONES_COMUNES = _simetrizar_confusiones(CONFUSIONES_COMUNES)
 
+GRUPO_CRITICO_ALFABETO = {'A', 'C', 'S', 'E', 'M', 'N', 'T'}
+
 GRUPOS_ALTA_CONFUSION = [
-    {'A', 'C', 'S', 'E', 'M', 'N', 'T'},
+    GRUPO_CRITICO_ALFABETO,
     {'B', 'D', 'P', '1', 'I', 'L'},
     {'O', 'C', 'Q', '0', 'G', 'E'},
     {'U', 'V', 'W', '2', 'N', 'H'},
@@ -184,7 +226,7 @@ GRUPOS_ALTA_CONFUSION = [
 ]
 
 SENAS_NO_FLIP = {
-    'A', 'C', 'D', 'G', 'J', 'P', 'Q', 'Z', 'B', 'F', 'R', 'T',
+    'A', 'C', 'D', 'G', 'J', 'P', 'Q', 'Z', 'Ñ', 'B', 'F', 'R', 'T',
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
     'ADIOS', 'VENIR', 'IR', 'DERECHA', 'IZQUIERDA', 'ARRIBA', 'ABAJO',
     'SOS', 'EMERGENCIA', 'SOCORRO', 'AUXILIO', 'PELIGRO', 'FUEGO', 'POLICIA',
@@ -262,7 +304,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
     },
     '4': {
         'confusiones_principales': ['B', 'Y', 'X', 'K'],
-        'caracteristicas_clave': ['cuatro_dedos_juntos', 'pulgar_cruzado'],
+        'caracteristicas_clave': ['cuatro_dedos_separados', 'pulgar_cruzado'],
         'penalizacion': 2.0,
         'augmentation_especial': {
             'rotation_range': 2.5,
@@ -272,7 +314,7 @@ CONFIG_CONFUSIONES_NUMERICAS = {
             'no_zoom': False
         },
         'diferencias_criticas': {
-            'vs_B': 'B pulgar delante, 4 pulgar cruzado',
+            'vs_B': '4 separa los cuatro dedos, B los mantiene juntos',
             'vs_Y': 'Y meñique y pulgar extendidos'
         }
     },
@@ -479,10 +521,24 @@ tipo_sena_config = {
     }
 }
 
-UMBRAL_MOVIMIENTO_PROMEDIO = 0.04
-UMBRAL_MOVIMIENTO_PICO = 0.10
+UMBRAL_MOVIMIENTO_PROMEDIO = 0.012
+UMBRAL_MOVIMIENTO_PICO = 0.03
 MIN_FRAMES_VALIDOS_PARA_ANALISIS = 3
 PROPORCION_FRAMES_CON_MOVIMIENTO = 0.4
+PROPORCION_MIN_PARA_PICO = 0.2
+
+
+def _frame_valido(kp: Optional[np.ndarray]) -> bool:
+    return kp is not None and not np.all(kp == 0)
+
+
+def _desplazamiento_por_punto(anterior: np.ndarray, actual: np.ndarray) -> Optional[float]:
+    pa = anterior.reshape(-1, 3)[:, :2]
+    pb = actual.reshape(-1, 3)[:, :2]
+    valido = ~np.all(pa == 0, axis=1) & ~np.all(pb == 0, axis=1)
+    if not np.any(valido):
+        return None
+    return float(np.mean(np.linalg.norm(pb[valido] - pa[valido], axis=1)))
 
 
 def detectar_tipo_por_movimiento(
@@ -490,18 +546,18 @@ def detectar_tipo_por_movimiento(
     umbral_promedio: float = UMBRAL_MOVIMIENTO_PROMEDIO,
     umbral_pico: float = UMBRAL_MOVIMIENTO_PICO,
 ) -> Tuple[str, Dict[str, Any]]:
-    frames_validos = [
-        kp for kp in keypoints_secuencia if kp is not None and not np.all(kp == 0)
-    ]
+    n_validos = sum(1 for kp in keypoints_secuencia if _frame_valido(kp))
 
-    if len(frames_validos) < MIN_FRAMES_VALIDOS_PARA_ANALISIS:
-        return 'ESTATICA', {'razon': 'frames_insuficientes', 'frames_validos': len(frames_validos)}
+    if n_validos < MIN_FRAMES_VALIDOS_PARA_ANALISIS:
+        return 'ESTATICA', {'razon': 'frames_insuficientes', 'frames_validos': n_validos}
 
     desplazamientos = []
-    for i in range(1, len(frames_validos)):
-        anterior = frames_validos[i - 1].reshape(-1, 3)[:, :2].flatten()
-        actual = frames_validos[i].reshape(-1, 3)[:, :2].flatten()
-        desplazamientos.append(float(np.linalg.norm(actual - anterior)))
+    for i in range(1, len(keypoints_secuencia)):
+        a, b = keypoints_secuencia[i - 1], keypoints_secuencia[i]
+        if _frame_valido(a) and _frame_valido(b):
+            d = _desplazamiento_por_punto(a, b)
+            if d is not None:
+                desplazamientos.append(d)
 
     if not desplazamientos:
         return 'ESTATICA', {'razon': 'sin_desplazamientos'}
@@ -510,13 +566,19 @@ def detectar_tipo_por_movimiento(
     movimiento_pico = float(np.max(desplazamientos))
     proporcion_frames_movidos = sum(1 for d in desplazamientos if d > umbral_promedio) / len(desplazamientos)
 
-    es_dinamica = movimiento_promedio > umbral_promedio and proporcion_frames_movidos >= PROPORCION_FRAMES_CON_MOVIMIENTO
+    por_media = (movimiento_promedio > umbral_promedio
+                 and proporcion_frames_movidos >= PROPORCION_FRAMES_CON_MOVIMIENTO)
+    por_pico = (movimiento_pico > umbral_pico
+                and proporcion_frames_movidos >= PROPORCION_MIN_PARA_PICO)
+    es_dinamica = por_media or por_pico
 
     detalles = {
         'movimiento_promedio': round(movimiento_promedio, 5),
         'movimiento_pico': round(movimiento_pico, 5),
         'proporcion_frames_movidos': round(proporcion_frames_movidos, 3),
-        'frames_analizados': len(frames_validos),
+        'frames_analizados': n_validos,
+        'pares_comparados': len(desplazamientos),
+        'criterio': 'media' if por_media else ('pico' if por_pico else 'ninguno'),
     }
 
     return ('DINAMICA' if es_dinamica else 'ESTATICA'), detalles
@@ -543,16 +605,13 @@ def calcular_tipo_clase_desde_muestras(
 
 
 def es_sena_emergencia(nombre_sena: str) -> bool:
-    if not nombre_sena:
-        return False
-    return nombre_sena.lower().strip() in SENAS_EMERGENCIA
+    return normalizar_nombre(nombre_sena) in SENAS_EMERGENCIA
 
 
 def detectar_tipo_sena(nombre_sena: str) -> str:
-    if not nombre_sena:
+    nombre_limpio = normalizar_nombre(nombre_sena)
+    if not nombre_limpio:
         return 'DINAMICA'
-
-    nombre_limpio = nombre_sena.lower().strip()
 
     if nombre_limpio in SENAS_EMERGENCIA:
         return 'EMERGENCIA'
@@ -566,19 +625,12 @@ def detectar_tipo_sena(nombre_sena: str) -> str:
     if len(nombre_limpio) == 1 and nombre_limpio.isalpha():
         return 'ESTATICA'
 
-    if nombre_limpio.isdigit() and len(nombre_limpio) <= 2:
-        return 'ESTATICA'
+    if nombre_limpio.isdigit():
+        return 'ESTATICA' if len(nombre_limpio) == 1 else 'DINAMICA'
 
     for patron in PATRONES_DINAMICOS:
         if re.match(patron, nombre_limpio):
             return 'DINAMICA'
-
-    if len(nombre_limpio.split()) == 1 and len(nombre_limpio) <= 8:
-        logger.warning(
-            f"detectar_tipo_sena: '{nombre_sena}' clasificada como ESTATICA "
-            "solo por longitud de palabra (heurístico no verificado)."
-        )
-        return 'ESTATICA'
 
     return 'DINAMICA'
 
@@ -589,9 +641,10 @@ def obtener_config_sena(nombre_sena: str) -> Dict[str, Any]:
     config['tipo_detectado'] = tipo_sena
     config['nombre_sena'] = nombre_sena
 
-    sena_upper = nombre_sena.upper()
+    sena_upper = _clave(nombre_sena)
     config['es_confusa'] = sena_upper in CONFUSIONES_COMUNES
-    config['permite_flip'] = sena_upper not in SENAS_NO_FLIP
+    config['permite_flip'] = tipo_sena == 'ESTATICA' and sena_upper not in SENAS_NO_FLIP
+    config['permite_zoom'] = True
     config['es_emergencia'] = tipo_sena == 'EMERGENCIA'
 
     config_confusion_numerica = obtener_config_confusion_numerica(nombre_sena)
@@ -622,7 +675,6 @@ def obtener_config_sena(nombre_sena: str) -> Dict[str, Any]:
         config['augmentation_rotation'] = 5.0
         config['augmentation_brightness'] = (0.9, 1.1)
         config['augmentation_contrast'] = (0.95, 1.05)
-        config['permite_zoom'] = config.get('permite_zoom', True)
 
     config['grupo_confusion'] = obtener_grupo_confusion(nombre_sena)
 
@@ -630,48 +682,59 @@ def obtener_config_sena(nombre_sena: str) -> Dict[str, Any]:
 
 
 def obtener_confusiones_comunes(sena: str) -> List[str]:
-    sena_upper = sena.upper()
-    return CONFUSIONES_COMUNES.get(sena_upper, [])
+    return CONFUSIONES_COMUNES.get(_clave(sena), [])
 
 
 def es_confusion_comun(sena_esperada: str, sena_detectada: str) -> bool:
-    if sena_esperada.upper() == sena_detectada.upper():
+    if _clave(sena_esperada) == _clave(sena_detectada):
         return False
 
     confusiones = obtener_confusiones_comunes(sena_esperada)
-    return sena_detectada.upper() in [c.upper() for c in confusiones]
+    return _clave(sena_detectada) in [c.upper() for c in confusiones]
 
 
 def obtener_config_confusion_numerica(sena: str) -> Dict[str, Any]:
-    sena_upper = sena.upper()
-    return CONFIG_CONFUSIONES_NUMERICAS.get(sena_upper, {})
+    return CONFIG_CONFUSIONES_NUMERICAS.get(_clave(sena), {})
 
 
 def es_confusion_numerica(sena_esperada: str, sena_detectada: str) -> bool:
-    sena_esperada_upper = sena_esperada.upper()
-    sena_detectada_upper = sena_detectada.upper()
+    sena_esperada_upper = _clave(sena_esperada)
+    sena_detectada_upper = _clave(sena_detectada)
 
     config_esperada = CONFIG_CONFUSIONES_NUMERICAS.get(sena_esperada_upper, {})
     if config_esperada:
-        confusiones_principales = config_esperada.get('confusiones_principales', [])
-        if sena_detectada_upper in confusiones_principales:
+        if sena_detectada_upper in config_esperada.get('confusiones_principales', []):
             return True
 
     config_detectada = CONFIG_CONFUSIONES_NUMERICAS.get(sena_detectada_upper, {})
     if config_detectada:
-        confusiones_principales = config_detectada.get('confusiones_principales', [])
-        if sena_esperada_upper in confusiones_principales:
+        if sena_esperada_upper in config_detectada.get('confusiones_principales', []):
             return True
 
     return False
 
 
-def calcular_factor_confusion_mejorado(sena_esperada: str, sena_detectada: str) -> float:
-    if sena_esperada.upper() == sena_detectada.upper():
-        return 1.0
+def obtener_grupos_confusion(sena: str) -> List[Set[str]]:
+    sena_upper = _clave(sena)
+    return [g for g in GRUPOS_ALTA_CONFUSION if sena_upper in g]
 
-    sena_esperada_upper = sena_esperada.upper()
-    sena_detectada_upper = sena_detectada.upper()
+
+def obtener_grupo_confusion(sena: str) -> Optional[Set[str]]:
+    grupos = obtener_grupos_confusion(sena)
+    return grupos[0] if grupos else None
+
+
+def _grupos_compartidos(sena_a: str, sena_b: str) -> List[Set[str]]:
+    b = _clave(sena_b)
+    return [g for g in obtener_grupos_confusion(sena_a) if b in g]
+
+
+def calcular_factor_confusion_mejorado(sena_esperada: str, sena_detectada: str) -> float:
+    sena_esperada_upper = _clave(sena_esperada)
+    sena_detectada_upper = _clave(sena_detectada)
+
+    if sena_esperada_upper == sena_detectada_upper:
+        return 1.0
 
     if es_sena_emergencia(sena_esperada) or es_sena_emergencia(sena_detectada):
         conf_emergencia = CONFIG_CONFUSIONES_EMERGENCIA.get(sena_esperada_upper, {})
@@ -697,9 +760,9 @@ def calcular_factor_confusion_mejorado(sena_esperada: str, sena_detectada: str) 
 
         return 3.0
 
-    grupo_esperada = obtener_grupo_confusion(sena_esperada)
-    if grupo_esperada and sena_detectada_upper in grupo_esperada:
-        if grupo_esperada == {'A', 'C', 'S', 'E', 'M', 'N', 'T'}:
+    compartidos = _grupos_compartidos(sena_esperada, sena_detectada)
+    if compartidos:
+        if any(g == GRUPO_CRITICO_ALFABETO for g in compartidos):
             return 3.0
         return 2.5
 
@@ -707,14 +770,6 @@ def calcular_factor_confusion_mejorado(sena_esperada: str, sena_detectada: str) 
         return 2.0
 
     return 1.3
-
-
-def obtener_grupo_confusion(sena: str) -> Optional[Set[str]]:
-    sena_upper = sena.upper()
-    for grupo in GRUPOS_ALTA_CONFUSION:
-        if sena_upper in grupo:
-            return grupo
-    return None
 
 
 def calcular_factor_confusion(sena_esperada: str, sena_detectada: str) -> float:
@@ -803,7 +858,7 @@ def validar_consistencia_categoria(senas: List[str]) -> Dict[str, Any]:
 
     tipo_mayoritario = max(conteo_tipos, key=conteo_tipos.get) if total > 0 else 'DINAMICA'
 
-    senas_confusas = [s for s in senas if s.upper() in CONFUSIONES_COMUNES]
+    senas_confusas = [s for s in senas if _clave(s) in CONFUSIONES_COMUNES]
     senas_confusion_numerica = []
     senas_grupo_critico = []
     senas_emergencia = [s for s in senas if es_sena_emergencia(s)]
@@ -813,8 +868,7 @@ def validar_consistencia_categoria(senas: List[str]) -> Dict[str, Any]:
         if config:
             senas_confusion_numerica.append(sena)
 
-        grupo = obtener_grupo_confusion(sena)
-        if grupo and any(s in ['A', 'C', 'S', 'E', 'M'] for s in grupo):
+        if any(any(s in ('A', 'C', 'S', 'E', 'M') for s in g) for g in obtener_grupos_confusion(sena)):
             senas_grupo_critico.append(sena)
 
     tiene_confusiones = len(senas_confusas) > 0
@@ -837,7 +891,7 @@ def validar_consistencia_categoria(senas: List[str]) -> Dict[str, Any]:
         'proporcion_dinamicas': round(proporcion_dinamicas, 3),
         'proporcion_emergencia': round(proporcion_emergencia, 3),
         'tipo_mayoritario': tipo_mayoritario,
-        'consistente': (proporcion_estaticas > 0.8 or proporcion_dinamicas > 0.8),
+        'consistente': (proporcion_estaticas > 0.8 or proporcion_dinamicas > 0.8 or proporcion_emergencia > 0.8),
         'tiene_confusiones': tiene_confusiones,
         'senas_confusas': senas_confusas,
         'senas_confusion_numerica': senas_confusion_numerica,
@@ -852,7 +906,7 @@ def es_categoria_alfabeto(senas: List[str]) -> bool:
         return False
 
     letras_alfabeto = set('abcdefghijklmnopqrstuvwxyzñ')
-    conteo_letras = sum(1 for sena in senas if sena.lower() in letras_alfabeto)
+    conteo_letras = sum(1 for sena in senas if normalizar_nombre(sena) in letras_alfabeto)
 
     return conteo_letras / len(senas) > 0.7
 
@@ -862,7 +916,7 @@ def es_categoria_numeros(senas: List[str]) -> bool:
         return False
 
     numeros = set('0123456789')
-    conteo_numeros = sum(1 for sena in senas if sena in numeros)
+    conteo_numeros = sum(1 for sena in senas if normalizar_nombre(sena) in numeros)
 
     return conteo_numeros / len(senas) > 0.7
 
@@ -927,15 +981,13 @@ def obtener_parametros_entrenamiento(senas: List[str]) -> Dict[str, Any]:
         parametros['label_smoothing'] = 0.05
         parametros['oversampling'] = '1x proporcional'
 
-    if analisis_consistencia['tipo_mayoritario'] == 'ESTATICA':
-        parametros['num_frames'] = 8
-        parametros['batch_size'] = 16
-    elif analisis_consistencia['tipo_mayoritario'] == 'EMERGENCIA':
-        parametros['num_frames'] = 20
-        parametros['batch_size'] = 8
-    else:
-        parametros['num_frames'] = 16
-        parametros['batch_size'] = 8
+    conteo = analisis_consistencia['conteo_tipos']
+    frames_por_tipo = {
+        t: CONFIG_SENAS[t]['num_frames_recomendado'] for t, n in conteo.items() if n > 0
+    }
+    parametros['num_frames'] = max(frames_por_tipo.values()) if frames_por_tipo else 16
+    solo_estaticas = bool(frames_por_tipo) and set(frames_por_tipo) == {'ESTATICA'}
+    parametros['batch_size'] = 16 if solo_estaticas else 8
 
     if es_alfabeto:
         parametros['epochs'] = max(parametros['epochs'], 150)
@@ -943,8 +995,8 @@ def obtener_parametros_entrenamiento(senas: List[str]) -> Dict[str, Any]:
 
     if es_numeros:
         parametros['epochs'] = max(parametros['epochs'], 180)
-        parametros['learning_rate'] = 0.0006
-        parametros['confusion_penalty'] = 3.0
+        parametros['learning_rate'] = min(parametros['learning_rate'], 0.0006)
+        parametros['confusion_penalty'] = max(parametros['confusion_penalty'], 3.0)
 
     if es_emergencia:
         parametros['epochs'] = max(parametros['epochs'], 200)
@@ -954,6 +1006,7 @@ def obtener_parametros_entrenamiento(senas: List[str]) -> Dict[str, Any]:
 
     return {
         **parametros,
+        'num_frames_por_tipo': frames_por_tipo,
         'analisis_consistencia': analisis_consistencia,
         'es_categoria_alfabeto': es_alfabeto,
         'es_categoria_numeros': es_numeros,
@@ -980,6 +1033,13 @@ def generar_recomendaciones_entrenamiento(consistencia: Dict[str, Any],
             recomendaciones.append("Categoría dinámica - usar 16 frames y captura de movimiento")
     else:
         recomendaciones.append("Categoría mixta - usar modelo adaptativo con doble backbone")
+
+    conteo = consistencia.get('conteo_tipos', {})
+    if conteo.get('ESTATICA', 0) and (conteo.get('DINAMICA', 0) or conteo.get('EMERGENCIA', 0)):
+        recomendaciones.append(
+            "Hay señas estáticas y con movimiento mezcladas: se usa el nº de frames del tipo más "
+            "exigente para todas; las estáticas se pueden muestrear del centro de la secuencia."
+        )
 
     if es_alfabeto:
         recomendaciones.append("Categoría ALFABETO - entrenar con LR bajo (0.0008) y 150+ épocas")
@@ -1063,7 +1123,7 @@ def analizar_pares_confusion(clases: List[str]) -> Dict[str, Any]:
                         'factor_penalizacion': factor,
                         'es_numerica': es_confusion_numerica(clase1, clase2),
                         'es_emergencia': es_sena_emergencia(clase1) or es_sena_emergencia(clase2),
-                        'mismo_grupo': obtener_grupo_confusion(clase1) == obtener_grupo_confusion(clase2)
+                        'mismo_grupo': bool(_grupos_compartidos(clase1, clase2))
                     }
                     pares_confusion.append(par)
 
@@ -1084,9 +1144,10 @@ def generar_matriz_confusion_teorica(clases: List[str]) -> Dict[str, List[str]]:
     for clase in clases:
         confusiones_posibles = []
         confusiones_conocidas = obtener_confusiones_comunes(clase)
+        conocidas_upper = [c.upper() for c in confusiones_conocidas]
 
         for otra_clase in clases:
-            if otra_clase != clase and otra_clase.upper() in [c.upper() for c in confusiones_conocidas]:
+            if _clave(otra_clase) != _clave(clase) and _clave(otra_clase) in conocidas_upper:
                 confusiones_posibles.append(otra_clase)
 
         if confusiones_posibles:
@@ -1095,7 +1156,7 @@ def generar_matriz_confusion_teorica(clases: List[str]) -> Dict[str, List[str]]:
     return matriz
 
 
-def exportar_configuracion_confusiones(clases: List[str], ruta_salida: str = None):
+def exportar_configuracion_confusiones(clases: List[str], ruta_salida: Optional[str] = None):
     analisis = {
         'timestamp': datetime.now().isoformat(),
         'total_clases': len(clases),
@@ -1115,32 +1176,36 @@ def exportar_configuracion_confusiones(clases: List[str], ruta_salida: str = Non
 
 
 def calibrar_modelo_usuario(usuario_id: int, senas_calibracion: Dict[str, str]) -> Dict[str, Any]:
-    resultados = {}
     ajustes = {}
 
     for sena_esperada, sena_detectada in senas_calibracion.items():
-        if sena_esperada != sena_detectada:
-            tipo_esperado = detectar_tipo_sena(sena_esperada)
-            tipo_detectado = detectar_tipo_sena(sena_detectada)
-            factor_confusion = calcular_factor_confusion_mejorado(sena_esperada, sena_detectada)
+        if _clave(sena_esperada) == _clave(sena_detectada):
+            continue
 
-            if tipo_esperado != tipo_detectado:
-                ajustes[sena_esperada] = {
-                    'tipo_corregido': tipo_esperado,
-                    'confianza_ajustada': 0.7,
-                    'factor_compensacion': 1.2,
-                    'confusion_comun': es_confusion_comun(sena_esperada, sena_detectada),
-                    'factor_penalizacion': factor_confusion,
-                    'es_emergencia': es_sena_emergencia(sena_esperada)
-                }
-            elif es_confusion_comun(sena_esperada, sena_detectada):
-                ajustes[sena_esperada] = {
-                    'confusion_comun': True,
-                    'sena_confundida': sena_detectada,
-                    'factor_penalizacion': factor_confusion,
-                    'es_confusion_numerica': es_confusion_numerica(sena_esperada, sena_detectada),
-                    'es_emergencia': es_sena_emergencia(sena_esperada)
-                }
+        tipo_esperado = detectar_tipo_sena(sena_esperada)
+        tipo_detectado = detectar_tipo_sena(sena_detectada)
+        factor_confusion = calcular_factor_confusion_mejorado(sena_esperada, sena_detectada)
+        comun = es_confusion_comun(sena_esperada, sena_detectada)
+
+        base = {
+            'sena_confundida': sena_detectada,
+            'confusion_comun': comun,
+            'factor_penalizacion': factor_confusion,
+            'es_confusion_numerica': es_confusion_numerica(sena_esperada, sena_detectada),
+            'es_emergencia': es_sena_emergencia(sena_esperada),
+        }
+
+        if tipo_esperado != tipo_detectado:
+            ajustes[sena_esperada] = {
+                **base,
+                'tipo_corregido': tipo_esperado,
+                'confianza_ajustada': 0.7,
+                'factor_compensacion': 1.2,
+            }
+        elif comun:
+            ajustes[sena_esperada] = base
+        else:
+            ajustes[sena_esperada] = {**base, 'error_no_catalogado': True}
 
     return {
         'usuario_id': usuario_id,
@@ -1157,9 +1222,9 @@ def generar_recomendaciones_calibracion(errores: Dict[str, Any]) -> List[str]:
     confusiones_emergencia = 0
 
     for sena, info_error in errores.items():
+        sena_confundida = info_error.get('sena_confundida', 'desconocida')
         if info_error.get('es_emergencia'):
             confusiones_emergencia += 1
-            sena_confundida = info_error.get('sena_confundida', 'desconocida')
             recomendaciones.append(
                 f"CRÍTICO DE SEGURIDAD: '{sena}' se confundió con '{sena_confundida}'. "
                 "Practica esta seña de emergencia con especial cuidado y, si es posible, "
@@ -1167,22 +1232,19 @@ def generar_recomendaciones_calibracion(errores: Dict[str, Any]) -> List[str]:
             )
         elif info_error.get('es_confusion_numerica', False):
             confusiones_numericas += 1
-            sena_confundida = info_error.get('sena_confundida', 'desconocida')
             config = obtener_config_confusion_numerica(sena)
-            if config:
-                diferencias = config.get('diferencias_criticas', {})
-                clave_diff = f"vs_{sena_confundida}"
-                if clave_diff in diferencias:
-                    recomendaciones.append(
-                        f"CRÍTICO '{sena}' <-> '{sena_confundida}': {diferencias[clave_diff]}"
-                    )
-                else:
-                    recomendaciones.append(
-                        f"Confusión numérica: '{sena}' se confunde con '{sena_confundida}'"
-                    )
+            diferencias = config.get('diferencias_criticas', {}) if config else {}
+            clave_diff = f"vs_{_clave(sena_confundida)}"
+            if clave_diff in diferencias:
+                recomendaciones.append(
+                    f"CRÍTICO '{sena}' <-> '{sena_confundida}': {diferencias[clave_diff]}"
+                )
+            else:
+                recomendaciones.append(
+                    f"Confusión numérica: '{sena}' se confunde con '{sena_confundida}'"
+                )
         elif info_error.get('confusion_comun'):
             confusiones_comunes += 1
-            sena_confundida = info_error.get('sena_confundida', 'desconocida')
             recomendaciones.append(
                 f"Confusión común: '{sena}' <-> '{sena_confundida}'. "
                 f"Practica las diferencias clave."
@@ -1192,6 +1254,11 @@ def generar_recomendaciones_calibracion(errores: Dict[str, Any]) -> List[str]:
             recomendaciones.append(
                 f"Seña '{sena}' es {tipo_esperado.lower()}. "
                 f"Ejecuta la seña {'sin movimiento' if tipo_esperado == 'ESTATICA' else 'con movimiento fluido'}."
+            )
+        else:
+            recomendaciones.append(
+                f"'{sena}' se confundió con '{sena_confundida}' (par no catalogado). "
+                "Revisa si conviene añadirlo a CONFUSIONES_COMUNES."
             )
 
     if confusiones_emergencia > 0:
@@ -1316,6 +1383,12 @@ def validar_integridad_configuracion() -> Dict[str, Any]:
         if sena.upper() not in CONFUSIONES_COMUNES:
             advertencias.append(
                 f"La seña de emergencia '{sena}' no tiene ninguna confusión registrada en CONFUSIONES_COMUNES"
+            )
+
+    for sena in SENAS_VERIFICADAS_DINAMICAS:
+        if sena.upper() not in CONFUSIONES_COMUNES:
+            advertencias.append(
+                f"La seña dinámica '{sena}' no tiene ninguna confusión registrada en CONFUSIONES_COMUNES"
             )
 
     return {
